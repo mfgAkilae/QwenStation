@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen Station</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1f26'/%3E%3Cpath d='M6 21l6-9 5 6 4-5 5 8' fill='none' stroke='%235cc8d6' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0d1f26; --panel: #132a33; --panel-2: #1a3540; --line: #274855;
+  --ink: #eaf3f4; --ink-2: #a8c0c6; --ink-3: #7f9aa2;
+  --data: #5cc8d6; --data-soft: rgba(92, 200, 214, .15); --grid: rgba(168, 192, 198, .16);
+  --good: #45c486; --warn: #e2a93b; --bad: #f07672;
+  --display: "Bahnschrift", "DIN Alternate", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  --body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #e6eeee; --panel: #fbfdfd; --panel-2: #eef4f4; --line: #cbd9da;
+    --ink: #0f2a32; --ink-2: #3d5a62; --ink-3: #5d7a83;
+    --data: #0e7c8b; --data-soft: rgba(14, 124, 139, .12); --grid: rgba(15, 42, 50, .12);
+    --good: #18844d; --warn: #9a6200; --bad: #c23b38;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--body); -webkit-font-smoothing: antialiased; }
+h1, h2, p { margin: 0; }
+button, select { font: inherit; color: inherit; }
+.num { font-family: var(--display); font-variant-numeric: tabular-nums; font-stretch: 90%; }
+.wrap { max-width: 1480px; margin: 0 auto; padding: 18px 22px 28px; }
+
+/* ---- header ---- */
+.top { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.ident h1 { font: 600 27px/1.05 var(--display); letter-spacing: .01em; font-stretch: 88%; }
+.ident p { color: var(--ink-2); font-size: 13px; margin-top: 3px; }
+.status { display: flex; align-items: center; gap: 9px; padding: 7px 14px 7px 11px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); }
+.status svg { width: 16px; height: 16px; flex: none; }
+.status strong { font: 600 15px var(--display); }
+.status span { color: var(--ink-2); font-size: 13px; }
+.status[data-tone="good"] svg { color: var(--good); }
+.status[data-tone="busy"] svg { color: var(--data); }
+.status[data-tone="warn"] svg { color: var(--warn); }
+.status[data-tone="bad"] svg { color: var(--bad); }
+.status[data-tone="off"] svg { color: var(--ink-3); }
+.status[data-tone="busy"] svg { animation: spin 1.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.controls { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+select, .btn { height: 34px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); padding: 0 12px; cursor: pointer; }
+select:disabled { opacity: .55; cursor: not-allowed; }
+.btn.primary { background: var(--data); border-color: var(--data); color: #06222a; font-weight: 600; }
+@media (prefers-color-scheme: light) { .btn.primary { color: #fff; } }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--ink-3); }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.btn:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 2px solid var(--data); outline-offset: 2px; }
+
+.endpoint { margin: 14px 0 16px; display: flex; flex-wrap: wrap; gap: 8px 26px; align-items: center; padding: 9px 14px; border: 1px dashed var(--line); border-radius: 10px; color: var(--ink-2); font-size: 13px; }
+.endpoint code { font: 13px var(--mono); color: var(--ink); user-select: all; }
+.copy { border: 0; background: none; color: var(--data); cursor: pointer; padding: 2px 4px; font-size: 12.5px; border-radius: 4px; }
+.copy:hover { text-decoration: underline; }
+
+/* ---- layout ---- */
+.grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.9fr) minmax(300px, 1fr); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+.panel h2 { font: 600 15px var(--display); letter-spacing: .01em; }
+.panel .hint { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; }
+.span2 { grid-column: 1 / -1; }
+
+/* ---- hero ---- */
+.hero { min-height: 318px; display: flex; flex-direction: column; }
+.readout { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.readout .big { font: 600 64px/.9 var(--display); font-variant-numeric: tabular-nums; font-stretch: 86%; }
+.readout .unit { font: 500 19px var(--display); color: var(--ink-2); padding-bottom: 6px; }
+.readout .activity { margin-left: auto; text-align: right; color: var(--ink-2); font-size: 13px; padding-bottom: 6px; max-width: 46%; }
+.readout .activity b { display: block; color: var(--ink); font: 600 15px var(--display); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: none; padding: 4px 10px; font-size: 12.5px; cursor: pointer; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--panel-2); color: var(--ink); font-weight: 600; }
+.chart-head { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 4px; color: var(--ink-3); font-size: 12.5px; }
+.chart { position: relative; flex: 1; min-height: 170px; }
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart text { fill: var(--ink-3); font: 11px var(--body); }
+.tip { position: fixed; z-index: 10; pointer-events: none; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12.5px; box-shadow: 0 6px 18px rgba(0, 0, 0, .28); white-space: nowrap; display: none; }
+.tip b { font: 600 14px var(--display); font-variant-numeric: tabular-nums; }
+.tip span { color: var(--ink-2); display: block; }
+
+/* startup ladder and notices share the hero */
+.ladder-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.ladder-head .big { font: 600 40px/1 var(--display); font-variant-numeric: tabular-nums; }
+.ladder-head span { color: var(--ink-2); }
+.overall { height: 6px; border-radius: 3px; background: var(--panel-2); margin: 12px 0 14px; overflow: hidden; }
+.overall i { display: block; height: 100%; background: var(--data); border-radius: 3px; transition: width .9s linear; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.steps li { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; color: var(--ink-3); }
+.steps li[data-s="active"] { color: var(--ink); font-weight: 600; }
+.steps li[data-s="done"] { color: var(--ink-2); }
+.steps svg { width: 16px; height: 16px; }
+.steps li[data-s="done"] svg { color: var(--good); }
+.steps li[data-s="active"] svg { color: var(--data); animation: spin 1.6s linear infinite; }
+.steps .t { font-family: var(--display); font-variant-numeric: tabular-nums; font-weight: 400; font-size: 13px; }
+.lastline { margin-top: auto; padding-top: 12px; font: 12px var(--mono); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.notice { margin: auto 0; max-width: 760px; }
+.notice h2 { font: 600 26px/1.15 var(--display); }
+.notice p { color: var(--ink-2); margin-top: 8px; font-size: 14.5px; }
+.notice pre { margin: 12px 0 0; padding: 10px 12px; background: var(--panel-2); border-radius: 8px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 110px; overflow: auto; color: var(--ink-2); }
+.notice ul { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
+.notice li { display: flex; gap: 8px; }
+.notice li svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.notice li.ok svg { color: var(--good); } .notice li.no svg { color: var(--bad); } .notice li.warn svg { color: var(--warn); }
+.notice .actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+.procs { margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
+.procs span { display: inline-block; margin: 0 12px 2px 0; }
+
+/* first-run setup, also in the hero */
+.field { display: grid; gap: 5px; margin-top: 16px; max-width: 520px; }
+.field label { color: var(--ink-2); font-size: 13px; }
+.field input { height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); padding: 0 11px; font: 13.5px var(--mono); }
+.field small { color: var(--ink-3); font-size: 12.5px; }
+.facts { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 3px; color: var(--ink-2); font-size: 13.5px; }
+.facts b { color: var(--ink); font-weight: 600; }
+.steps.two { grid-template-columns: 1fr 1fr; column-gap: 34px; }
+.steps li[data-s="skipped"] svg { color: var(--ink-3); }
+.steps li[data-s="failed"] { color: var(--bad); font-weight: 600; }
+.setup-foot { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+.setup-foot .lastline { margin: 0; padding: 0; flex: 1; min-width: 0; }
+.setup-error { color: var(--bad); margin: 0 0 12px; font-size: 14px; max-width: 86ch; }
+
+/* ---- GPU ---- */
+.meter { height: 10px; border-radius: 5px; background: var(--panel-2); overflow: hidden; margin: 8px 0 4px; }
+.meter i { display: block; height: 100%; background: var(--data); border-radius: 5px; transition: width .6s; }
+.meter i[data-tone="warn"] { background: var(--warn); }
+.row-between { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.vram .num { font-size: 26px; font-weight: 600; }
+.vram small, .spark small { color: var(--ink-3); font-size: 12.5px; }
+.spark { display: grid; grid-template-columns: 124px 1fr; gap: 12px; align-items: center; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line); }
+.spark .num { font-size: 22px; font-weight: 600; display: block; line-height: 1.1; }
+.spark .chart { min-height: 46px; height: 46px; }
+
+/* ---- stat tiles ---- */
+.tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 13px 16px 14px; min-width: 0; }
+.tile h2 { font: 400 13px var(--body); color: var(--ink-2); }
+.tile .num { font-size: 31px; font-weight: 600; line-height: 1.15; display: block; margin-top: 3px; }
+.tile .num small { font-size: 15px; font-weight: 500; color: var(--ink-2); margin-left: 3px; }
+.tile p { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; }
+.tile .meter { height: 5px; margin: 7px 0 0; }
+.tile[data-tone="warn"] { border-color: var(--warn); }
+.tile[data-tone="warn"] p { color: var(--warn); }
+
+/* ---- table ---- */
+.tablewrap { overflow-x: auto; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: right; font-weight: 400; color: var(--ink-3); padding: 0 10px 6px; white-space: nowrap; border-bottom: 1px solid var(--line); }
+td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line); font-family: var(--display); font-variant-numeric: tabular-nums; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+th:last-child, td:last-child { text-align: left; padding-right: 0; font-family: var(--body); }
+tr:last-child td { border-bottom: 0; }
+td.dim { color: var(--ink-3); }
+.empty { color: var(--ink-3); padding: 22px 0 10px; font-size: 13.5px; }
+.bars { height: 190px; margin-top: 8px; }
+
+/* ---- connect ---- */
+.clients { display: grid; gap: 9px; margin-top: 12px; }
+.client { display: grid; grid-template-columns: 20px 1fr; gap: 10px; }
+.client svg { width: 17px; height: 17px; margin-top: 2px; }
+.client[data-s="ok"] svg { color: var(--good); } .client[data-s="error"] svg { color: var(--bad); }
+.client[data-s="outdated"] svg, .client[data-s="missing"] svg { color: var(--warn); }
+.client b { font: 600 14px var(--display); }
+.client span { color: var(--ink-2); font-size: 12.5px; display: block; word-break: break-all; }
+ol.how { margin: 14px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 13px; display: grid; gap: 5px; max-width: 62ch; }
+ol.how code { font: 12.5px var(--mono); color: var(--ink); }
+
+/* ---- log ---- */
+.loghead { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.loghead label { color: var(--ink-2); font-size: 12.5px; display: flex; gap: 6px; align-items: center; cursor: pointer; }
+#log { margin: 10px 0 0; height: 250px; overflow: auto; background: var(--bg); border-radius: 8px; padding: 9px 11px; font: 11.5px/1.55 var(--mono); color: var(--ink-2); white-space: pre-wrap; word-break: break-all; }
+#log .warn { color: var(--warn); } #log .error { color: var(--bad); } #log .step { color: var(--ink); font-weight: 600; }
+.warnline { display: flex; gap: 9px; margin: -4px 0 16px; padding: 9px 14px; border-radius: 10px; border: 1px solid var(--warn); color: var(--ink); font-size: 13px; }
+.warnline svg { width: 16px; height: 16px; flex: none; color: var(--warn); margin-top: 2px; }
+.banner { display: none; margin-bottom: 14px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--bad); color: var(--bad); background: var(--panel); }
+.mock { color: var(--warn); border: 1px solid var(--warn); border-radius: 6px; padding: 1px 7px; font-size: 12px; }
+[hidden] { display: none !important; }
+
+@media (max-width: 1080px) { .grid { grid-template-columns: 1fr; } .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .readout .activity { max-width: none; margin-left: 0; text-align: left; } }
+@media (max-width: 760px) { .steps.two { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } .readout .big { font-size: 50px; } .controls { margin-left: 0; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-check" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.8 8.3l2.2 2.2 4.2-4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-spin" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.8H1.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.4v3.4M8 11.7v.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-off" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5.6 5.6h4.8v4.8H5.6z" fill="currentColor"/></symbol>
+  <symbol id="i-dot" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+</svg>
+
+<div class="wrap">
+  <div class="banner" id="banner" role="alert"></div>
+
+  <header class="top">
+    <div class="ident">
+      <h1 id="title">Qwen3.8 27B</h1>
+      <p id="subtitle">NVFP4, FP8 KV, DFlash2 on the RTX 5090</p>
+    </div>
+    <div class="status" id="status" data-tone="off" role="status" aria-live="polite">
+      <svg aria-hidden="true"><use id="statusIcon" href="#i-off"/></svg>
+      <strong id="stateLabel">Connecting</strong><span id="stateDetail"></span>
+    </div>
+    <div class="controls">
+      <span class="mock" id="mockTag" hidden>Mock server, no model</span>
+      <select id="preset" aria-label="Preset"></select>
+      <button class="btn primary" id="primary" type="button">Start</button>
+      <button class="btn" id="quit" type="button" title="Stop the model and close Qwen Station">Quit</button>
+    </div>
+  </header>
+
+  <div class="endpoint">
+    <span>API <code id="baseUrl"></code> <button class="copy" data-copy="baseUrl" type="button">Copy</button></span>
+    <span>Model <code id="modelId"></code> <button class="copy" data-copy="modelId" type="button">Copy</button></span>
+    <span>API key: none needed. If a client asks for one, use <code>local</code>.</span>
+  </div>
+
+  <div class="warnline" id="warnline" role="status" hidden><svg aria-hidden="true"><use href="#i-warn"/></svg><span id="warnText"></span></div>
+
+  <main class="grid">
+    <section class="panel hero" id="hero" aria-label="Speed"></section>
+
+    <section class="panel" aria-label="GPU">
+      <div class="row-between"><h2 id="gpuName">GPU</h2><span class="hint" id="gpuNote"></span></div>
+      <div class="vram">
+        <div class="row-between" style="margin-top:10px"><span><span class="num" id="vramUsed">–</span> <small id="vramTotal"></small></span><small>VRAM in use</small></div>
+        <div class="meter"><i id="vramBar" style="width:0"></i></div>
+      </div>
+      <div class="spark"><div><span class="num" id="utilNow">–</span><small>Utilization</small></div><div class="chart" id="utilChart"></div></div>
+      <div class="spark"><div><span class="num" id="powerNow">–</span><small id="powerNote">Power</small></div><div class="chart" id="powerChart"></div></div>
+      <div class="spark"><div><span class="num" id="tempNow">–</span><small>Temperature</small></div><div class="chart" id="tempChart"></div></div>
+    </section>
+
+    <div class="tiles span2">
+      <div class="tile" id="tileTtft"><h2>Time to first token</h2><span class="num">–</span><p></p></div>
+      <div class="tile" id="tileCtx"><h2>Context in KV cache</h2><span class="num">–</span><p></p><div class="meter"><i style="width:0"></i></div></div>
+      <div class="tile" id="tileCache"><h2>Prefix cache hits</h2><span class="num">–</span><p></p></div>
+      <div class="tile" id="tileDraft"><h2>Tokens per draft round</h2><span class="num">–</span><p></p></div>
+      <div class="tile" id="tilePre"><h2>Preemptions</h2><span class="num">–</span><p></p></div>
+    </div>
+
+    <section class="panel" aria-label="Recent requests">
+      <h2>Recent requests</h2>
+      <p class="hint">Derived from the server counters, one row per completed request.</p>
+      <div class="tablewrap" id="requests"></div>
+    </section>
+
+    <section class="panel" aria-label="Draft acceptance">
+      <h2>Draft acceptance by position</h2>
+      <p class="hint">Share of rounds in which the DFlash2 drafter&#39;s n-th token was accepted.</p>
+      <div class="chart bars" id="posChart"></div>
+    </section>
+
+    <section class="panel" aria-label="Connect">
+      <h2>Connect to T3 Code</h2>
+      <div class="clients" id="clients"></div>
+      <ol class="how">
+        <li>In T3 Code, choose <b>OpenCode</b> or <b>Pi</b> as the provider.</li>
+        <li>Select the model <code id="slug">vllm/qwen38-gittensor-dflash</code>. If Pi does not list it, open Settings, Providers, Pi and add it as a custom model with exactly this slug.</li>
+        <li>Set reasoning to <code>low</code>, <code>medium</code> or <code>xhigh</code>. This checkpoint does not support other levels.</li>
+      </ol>
+    </section>
+
+    <section class="panel" aria-label="Log">
+      <div class="loghead"><h2>Server log</h2><label><input type="checkbox" id="logFilter"> Warnings and errors only</label></div>
+      <div id="log" tabindex="0" aria-label="Server log"></div>
+    </section>
+  </main>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+"use strict";
+const TOKEN = "__STATION_TOKEN__";
+const $ = (id) => document.getElementById(id);
+const nf0 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const nf1 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const esc = (text) => String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
+
+const store = { state: null, samples: [], requests: [], log: [], lastT: 0, logSeq: 0, reqSeq: 0, range: 300, failures: 0, quit: false, heroMode: "", rate: [] };
+
+function duration(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+function secondsText(value) {
+  if (value == null) return "–";
+  return value < 10 ? `${nf1.format(value)} s` : `${nf0.format(value)} s`;
+}
+const clock = (t) => new Date(t * 1000).toLocaleTimeString("en-GB");
+
+/* ---------- API ---------- */
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "X-Station-Token": TOKEN, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function poll() {
+  if (store.quit) return;
+  try {
+    const data = await api(`/api/state?since=${store.lastT}&log=${store.logSeq}&req=${store.reqSeq}`);
+    store.failures = 0;
+    $("banner").style.display = "none";
+    if (store.state && data.generation !== store.state.generation) { store.requests = []; }
+    if (data.request_seq < store.reqSeq) { store.requests = []; }
+    store.state = data;
+    for (const sample of data.samples) store.samples.push(sample);
+    if (store.samples.length > 1800) store.samples.splice(0, store.samples.length - 1800);
+    if (data.samples.length) store.lastT = data.samples[data.samples.length - 1].t;
+    store.requests = data.requests.concat(store.requests).slice(0, 40);
+    store.reqSeq = data.request_seq;
+    if (data.log.length) appendLog(data.log);
+    store.logSeq = data.log_seq;
+    render();
+  } catch (error) {
+    store.failures += 1;
+    if (store.failures >= 3) {
+      $("banner").textContent = "No connection to Qwen Station. The app is no longer running. Open Qwen-Station.exe to start it again.";
+      $("banner").style.display = "block";
+      setStatus("off", "off", "Disconnected", "");
+    }
+  }
+}
+
+/* ---------- rendering ---------- */
+const STATES = {
+  idle: ["off", "off", "Stopped"], stopped: ["off", "off", "Stopped"], preflight: ["busy", "spin", "Checking"],
+  starting: ["busy", "spin", "Loading"], ready: ["good", "check", "Ready"], stopping: ["busy", "spin", "Stopping"],
+  blocked: ["warn", "warn", "Blocked"], failed: ["bad", "x", "Error"],
+};
+function setStatus(tone, iconName, label, detail) {
+  $("status").dataset.tone = tone;
+  $("statusIcon").setAttribute("href", `#i-${iconName}`);
+  $("stateLabel").textContent = label;
+  $("stateDetail").textContent = detail;
+}
+
+const SETUP_STATES = {
+  checking: ["busy", "spin", "Checking the installation"], needed: ["warn", "warn", "Setup needed"],
+  running: ["busy", "spin", "Setting up"], failed: ["bad", "x", "Setup interrupted"],
+  restart: ["warn", "warn", "Restart needed"],
+};
+const inSetup = (s) => !!(s.setup && SETUP_STATES[s.setup.state]);
+
+function render() {
+  const s = store.state;
+  const [tone, iconName, label] = (inSetup(s) ? SETUP_STATES[s.setup.state] : STATES[s.state]) || STATES.idle;
+  let detail = "";
+  if (inSetup(s)) detail = s.setup.state === "running" ? `for ${duration(s.now - s.setup.started_at)}` : "";
+  else if (s.state === "ready") {
+    detail = (s.external ? "started externally, " : "") + `for ${duration(s.now - s.ready_at)}`;
+  } else if (s.state === "starting") detail = `for ${duration(s.now - s.started_at)}`;
+  setStatus(tone, iconName, label, detail);
+  document.title = `${label} · Qwen Station`;
+  $("title").textContent = s.model.title;
+  const preset = s.presets[s.preset];
+  const build = s.facts.vllm_version ? `, vLLM ${s.facts.vllm_version}` : "";
+  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${preset.max_seqs === 1 ? "1 slot" : preset.max_seqs + " slots"}${build}`;
+  $("baseUrl").textContent = s.api.base_url;
+  $("modelId").textContent = s.api.model;
+  $("mockTag").hidden = !s.station.mock;
+  $("warnline").hidden = !s.warning;
+  $("warnText").textContent = s.warning || "";
+
+  const select = $("preset");
+  if (!select.options.length) {
+    for (const [key, value] of Object.entries(s.presets)) select.add(new Option(`${value.label}`, key));
+  }
+  const running = ["starting", "ready", "stopping", "preflight"].includes(s.state);
+  if (document.activeElement !== select) select.value = s.preset;
+  select.disabled = running || inSetup(s);
+  select.title = running ? "Stop the model to switch presets" : s.presets[select.value].note;
+  const primary = $("primary");
+  primary.textContent = running ? "Stop" : "Start";
+  primary.className = running ? "btn danger" : "btn primary";
+  primary.disabled = s.state === "stopping" || s.state === "preflight" || inSetup(s);
+
+  renderHero(s);
+  renderGpu(s);
+  renderTiles(s);
+  renderRequests(s);
+  renderPositions(s);
+  renderClients(s);
+}
+
+function renderHero(s) {
+  const hero = $("hero");
+  const mode = inSetup(s) ? (["running", "failed"].includes(s.setup.state) ? "setup" : "notice")
+    : s.state === "ready" ? "speed" : s.state === "starting" ? "ladder" : "notice";
+  if (mode !== store.heroMode) {
+    store.heroMode = mode;
+    if (mode === "speed") {
+      hero.innerHTML = `<div class="readout"><span class="big" id="tps">0</span><span class="unit" id="tpsUnit">tokens per second</span>
+        <div class="activity"><b id="actTitle"></b><span id="actText"></span></div></div>
+        <div class="chart-head"><span>Decode speed, averaged over 3 seconds</span>
+        <span class="seg" role="group" aria-label="Time range">${[[300, "5 min"], [900, "15 min"], [1800, "30 min"]].map(([v, t]) =>
+          `<button type="button" data-range="${v}" aria-pressed="${store.range === v}">${t}</button>`).join("")}</span></div>
+        <div class="chart" id="tpsChart" role="img" aria-label="Decode speed over time"></div>`;
+    } else if (mode === "ladder") {
+      hero.innerHTML = `<div class="ladder-head"><span class="big" id="elapsed">00:00</span><span id="eta"></span></div>
+        <div class="overall"><i id="overall" style="width:0"></i></div><ul class="steps" id="steps"></ul><div class="lastline" id="lastline"></div>`;
+    } else if (mode === "setup") {
+      hero.innerHTML = `<p class="setup-error" id="setupError" role="alert" hidden></p>
+        <div class="ladder-head"><span class="big" id="elapsed">00:00</span><span id="eta"></span></div>
+        <div class="overall"><i id="overall" style="width:0"></i></div><ul class="steps two" id="steps"></ul>
+        <div class="setup-foot"><div class="lastline" id="lastline"></div><span id="setupActions"></span></div>`;
+    } else hero.innerHTML = `<div class="notice" id="notice"></div>`;
+  }
+  if (mode === "setup") renderSetup(s);
+  else if (mode === "speed") renderSpeed(s);
+  else if (mode === "ladder") renderLadder(s);
+  else renderNotice(s);
+}
+
+function renderSpeed(s) {
+  const live = s.live;
+  // Between requests the readout holds the last request's pace instead of dropping to zero.
+  const last = store.requests[0];
+  const idle = !live || live.activity !== "decode";
+  const held = idle && last && last.decode_tps != null;
+  $("tps").textContent = held ? nf0.format(last.decode_tps) : (live ? nf0.format(live.tps) : "–");
+  $("tpsUnit").textContent = held ? "tokens per second in the last request" : "tokens per second, live";
+  let title = "Waiting for requests", text = "Idle";
+  if (s.metrics_error) { title = "No metrics"; text = s.metrics_error; }
+  else if (live) {
+    const since = duration(s.now - live.activity_since);
+    if (live.activity === "decode") { title = "Decode running"; text = `for ${since}` + (live.waiting ? `, ${live.waiting} in the queue` : ""); }
+    else if (live.activity === "prefill") { title = "Prefill running"; text = `for ${since}. A cold prompt with more than 200K tokens takes 80 to 110 s.`; }
+    else text = `for ${since}`;
+  }
+  $("actTitle").textContent = title;
+  $("actText").textContent = text;
+  const from = s.now - store.range;
+  const points = store.samples.filter((p) => p.t >= from).map((p) => ({ t: p.t, v: p.tps }));
+  lineChart($("tpsChart"), points, { from, to: s.now, unit: "tok/s", minMax: 100, axis: true });
+}
+
+function renderLadder(s) {
+  const elapsed = s.now - s.started_at;
+  const typical = s.phases.reduce((sum, phase) => sum + phase.typical, 0);
+  $("elapsed").textContent = duration(elapsed);
+  $("eta").textContent = s.setup && s.setup.fresh && !store.requests.length
+    ? "First start after setup: vLLM builds some GPU kernels once. This takes two to three minutes. Later starts take about one."
+    : elapsed <= typical * 1.4
+    ? `Model loading, this usually takes about ${Math.round(typical / 60)} minutes`
+    : "Taking longer than usual. After the cache paths change, vLLM recompiles the kernels.";
+  let done = 0;
+  $("steps").innerHTML = s.phases.map((phase) => {
+    let time = "";
+    if (phase.status === "done") { done += phase.typical; time = secondsText(phase.seconds); }
+    else if (phase.status === "active") { done += Math.min(phase.seconds, phase.typical * .95); time = `${secondsText(phase.seconds)} of about ${phase.typical} s`; }
+    else if (phase.status === "skipped") { done += phase.typical; }
+    const mark = phase.status === "done" ? "check" : phase.status === "active" ? "spin" : "dot";
+    return `<li data-s="${phase.status}">${icon(mark)}<span>${esc(phase.label)}</span><span class="t">${time}</span></li>`;
+  }).join("");
+  $("overall").style.width = `${Math.min(99, (done / typical) * 100)}%`;
+  const last = store.log.length ? store.log[store.log.length - 1].text : "";
+  $("lastline").textContent = last;
+}
+
+function renderNotice(s) {
+  const error = s.error;
+  let html = "";
+  const checks = (s.preflight || []).map((c) => `<li class="${c.ok ? "ok" : "no"}">${icon(c.ok ? "check" : "x")}<span><b>${esc(c.label)}:</b> ${esc(c.detail)}</span></li>`).join("");
+  const setup = s.setup || {};
+  if (setup.state === "checking") html = `<h2>Checking the installation</h2><p>Qwen Station checks whether the engine and the model are set up.</p>`;
+  else if (setup.state === "restart") {
+    html = `<h2>Windows needs to restart once</h2>
+      <p>WSL is installed but only becomes active after a restart. Qwen Station then opens by itself and sets up the rest. Save open work in other programs first.</p>
+      <div class="actions"><button class="btn primary" data-act="setup-restart">Restart now</button>
+        <button class="btn" data-act="setup-check">Check again without restarting</button></div>`;
+  } else if (setup.state === "needed") {
+    const update = setup.reason === "update";
+    const blocked = (setup.checks || []).some((c) => c.blocking && !c.ok);
+    const needs = (setup.checks || []).map((c) => { const kind = !c.ok ? "no" : c.warn ? "warn" : "ok";
+      return `<li class="${kind}">${icon({ ok: "check", warn: "warn", no: "x" }[kind])}<span><b>${esc(c.label)}:</b> ${esc(c.detail)}</span></li>`; }).join("");
+    html = `<h2>${update ? "Update the engine" : "Set up Qwen Station"}</h2>
+      <p>${update ? "This version ships a newer engine. Existing parts stay. Only changed parts are downloaded."
+        : "The app sets up everything by itself: its own Linux environment in WSL, vLLM and the model. It changes nothing on your existing system."}</p>
+      <ul class="facts"><li><b>Download:</b> about 30 GB, 20 GB of it for the model</li>
+        <li><b>Disk space:</b> about 32 GB, at least ${setup.min_free_gb} GB free</li>
+        <li><b>Duration:</b> 8 to 60 minutes, depending on your connection. If interrupted, setup resumes from there later.</li></ul>
+      <ul>${needs}</ul>
+      <div class="field"><label for="setupLocation">Folder for the engine and the model</label>
+        <input id="setupLocation" type="text" spellcheck="false" autocomplete="off" value="${esc(setup.location)}"${update ? " disabled" : ""}>
+        <small>A fast SSD works best. In WSL, the Linux environment is named “${esc(setup.distro)}”.</small></div>
+      <p class="setup-error" id="setupStartError" role="alert" style="margin:12px 0 0" hidden></p>
+      <div class="actions"><button class="btn primary" data-act="setup"${blocked ? " disabled" : ""}>${update ? "Update" : "Set up"}</button>
+        ${blocked ? `<button class="btn" data-act="setup-check">Check again</button>` : ""}</div>`;
+  } else if (s.state === "preflight") html = `<h2>Checking requirements</h2><p>Installation, WSL, port and free VRAM.</p>`;
+  else if (s.state === "stopping") html = `<h2>Stopping the model</h2><p>The server shuts down and frees the VRAM.</p>`;
+  else if (s.state === "blocked" && error) {
+    html = `<h2>${esc(error.title)}</h2><ul>${checks}</ul>`;
+    if (s.gpu_processes && s.gpu_processes.length) {
+      html += `<div class="procs">GPU memory per program (all GPUs): ${s.gpu_processes.map((p) =>
+        `<span><b>${esc(p.name)}</b> ${nf1.format(p.mib / 1024)} GiB</span>`).join("")}</div>`;
+    }
+    html += `<div class="actions"><button class="btn primary" data-act="start">Check again and start</button>`
+      + (error.forceable ? `<button class="btn" data-act="force">Start anyway</button>` : "") + `</div>`;
+  } else if (s.state === "failed" && error) {
+    html = `<h2>${esc(error.title)}</h2><p>${esc(error.detail)}</p>` + (error.raw ? `<pre>${esc(error.raw)}</pre>` : "")
+      + `<p>The full output is in the server log below.</p><div class="actions"><button class="btn primary" data-act="start">Restart</button></div>`;
+  } else {
+    html = `<h2>The model is stopped</h2><p>${esc(s.message && s.state === "stopped" && s.message !== "Stopped" ? s.message + ". " : "")}Choose a preset above and start. Loading takes about one minute.</p>
+      <div class="actions"><button class="btn primary" data-act="start">Start</button></div>`;
+  }
+  const notice = $("notice");
+  if (notice.dataset.html !== html) { notice.innerHTML = html; notice.dataset.html = html; }
+}
+
+function renderSetup(s) {
+  const setup = s.setup, failed = setup.state === "failed";
+  const gb = (bytes) => nf1.format(bytes / 1e9);
+  $("setupError").hidden = !failed;
+  $("setupError").textContent = failed ? setup.error : "";
+  $("elapsed").textContent = duration(s.now - setup.started_at);
+  let done = 0, total = 0, active = null;
+  $("steps").innerHTML = setup.steps.map((step) => {
+    total += step.weight;
+    let time = "", share = 0;
+    const p = step.progress;
+    if (step.status === "done") { share = 1; time = p ? `${gb(p[1])} GB in ${duration(step.seconds)}` : secondsText(step.seconds); }
+    else if (step.status === "skipped") { share = 1; time = "already present"; }
+    else if (step.status === "active") {
+      active = step;
+      share = p && p[1] ? Math.min(.99, p[0] / p[1]) : .3;
+      time = p && p[1] ? `${gb(p[0])} of ${gb(p[1])} GB` : duration(step.seconds);
+    } else if (step.status === "failed") time = "failed";
+    done += share * step.weight;
+    const mark = { done: "check", skipped: "check", active: "spin", failed: "x" }[step.status] || "dot";
+    return `<li data-s="${step.status}">${icon(mark)}<span>${esc(step.label)}</span><span class="t">${time}</span></li>`;
+  }).join("");
+  $("overall").style.width = `${Math.min(99, total ? (done / total) * 100 : 0)}%`;
+  let eta = failed ? "Completed steps are kept." : "Keep this window open. Completed steps are kept even if setup is interrupted.";
+  if (active && active.progress && active.progress[1]) {
+    const now = { id: active.id, bytes: active.progress[0], t: s.now };
+    store.rate = store.rate.filter((r) => r.id === now.id && now.t - r.t <= 30);
+    store.rate.push(now);
+    const first = store.rate[0], span = now.t - first.t, speed = span >= 6 ? (now.bytes - first.bytes) / span : 0;
+    if (speed > 0) eta = `${nf1.format(speed / 1e6)} MB/s, about ${duration((active.progress[1] - now.bytes) / speed)} left for this download.`;
+  }
+  $("eta").textContent = eta;
+  $("lastline").textContent = store.log.length ? store.log[store.log.length - 1].text : "";
+  const actions = failed ? `<button class="btn primary" data-act="setup">Try again</button>` : `<button class="btn" data-act="setup-cancel">Cancel</button>`;
+  if ($("setupActions").dataset.html !== actions) { $("setupActions").innerHTML = actions; $("setupActions").dataset.html = actions; }
+}
+
+function renderGpu(s) {
+  const g = s.gpu;
+  $("gpuName").textContent = g ? g.name.replace("NVIDIA GeForce ", "") : "GPU";
+  $("gpuNote").textContent = g ? "" : (s.gpu_error || "no data from nvidia-smi");
+  if (g) {
+    const share = g.mem_used / g.mem_total;
+    $("vramUsed").textContent = `${nf1.format(g.mem_used / 1024)} GiB`;
+    $("vramTotal").textContent = `of ${nf1.format(g.mem_total / 1024)} GiB`;
+    $("vramBar").style.width = `${share * 100}%`;
+    $("vramBar").dataset.tone = share > .985 ? "warn" : "";
+    $("utilNow").textContent = g.util == null ? "–" : `${nf0.format(g.util)}%`;
+    $("powerNow").textContent = g.power == null ? "–" : `${nf0.format(g.power)} W`;
+    $("powerNote").textContent = g.power_limit ? `Power, max ${nf0.format(g.power_limit)} W` : "Power";
+    $("tempNow").textContent = g.temp == null ? "–" : `${nf0.format(g.temp)} °C`;
+  }
+  const from = s.now - 300;
+  const series = (key) => store.samples.filter((p) => p.t >= from).map((p) => ({ t: p.t, v: p[key] }));
+  lineChart($("utilChart"), series("util"), { from, to: s.now, unit: "%", fixedMax: 100 });
+  lineChart($("powerChart"), series("power"), { from, to: s.now, unit: "W", minMax: (g && g.power_limit) || 400 });
+  lineChart($("tempChart"), series("temp"), { from, to: s.now, unit: "°C", minMax: 90 });
+}
+
+function tile(id, value, unit, note, tone) {
+  const el = $(id);
+  el.querySelector(".num").innerHTML = value == null ? "–" : `${esc(value)}${unit ? `<small>${esc(unit)}</small>` : ""}`;
+  el.querySelector("p").textContent = note || "";
+  el.dataset.tone = tone || "";
+}
+function renderTiles(s) {
+  const t = s.totals, live = s.live, last = store.requests[0];
+  if (!t) {
+    for (const id of ["tileTtft", "tileCtx", "tileCache", "tileDraft", "tilePre"]) tile(id, null, "", s.state === "ready" ? "" : "once the model is running");
+    $("tileCtx").querySelector(".meter i").style.width = "0";
+    return;
+  }
+  tile("tileTtft", last && last.ttft_s != null ? nf1.format(last.ttft_s) : (t.ttft_avg_s != null ? nf1.format(t.ttft_avg_s) : null), "s",
+    t.requests ? `last request. Average ${secondsText(t.ttft_avg_s)} over ${nf0.format(t.requests)} ${t.requests === 1 ? "request" : "requests"}` : "no request yet");
+  const kv = live ? live.kv : 0;
+  const capacity = s.facts.kv_tokens || s.model.context;
+  tile("tileCtx", nf0.format(kv * 100), "%", `about ${nf0.format(kv * capacity)} of ${nf0.format(capacity)} tokens`);
+  $("tileCtx").querySelector(".meter i").style.width = `${Math.min(100, kv * 100)}%`;
+  tile("tileCache", t.prefix_hit_rate == null ? null : nf0.format(t.prefix_hit_rate * 100), "%", "of prompt tokens came from the cache");
+  tile("tileDraft", t.accept_length == null ? null : nf1.format(t.accept_length), "",
+    t.accept_rate == null ? "" : `${nf0.format(t.accept_rate * 100)}% of draft tokens accepted`);
+  tile("tilePre", nf0.format(t.preemptions), "", t.preemptions ? "Slows decoding down silently. Check the prefill threshold of 2048." : "none, as it should be", t.preemptions ? "warn" : "");
+}
+
+function renderRequests(s) {
+  const box = $("requests");
+  if (!store.requests.length) {
+    const text = s.state === "ready" ? "No request yet. Send a prompt to the model from T3 Code and it shows up here."
+      : "Requests show up here once the model is running.";
+    if (box.dataset.sig !== text) { box.innerHTML = `<p class="empty">${text}</p>`; box.dataset.sig = text; }
+    return;
+  }
+  const sig = `${store.requests[0].seq}:${store.requests.length}`;
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  const finish = (row) => Object.keys(row.finish).map((k) => ({ stop: "done", length: "limit reached", abort: "aborted", tool_calls: "tool call" }[k] || k)).join(", ") || "–";
+  box.innerHTML = `<table><thead><tr><th>Time</th><th>Prompt</th><th>From cache</th><th>Output</th><th>TTFT</th><th>Speed</th><th>Finish</th></tr></thead><tbody>`
+    + store.requests.slice(0, 9).map((r) => `<tr><td>${clock(r.t)}</td><td>${nf0.format(r.prompt_tokens)}</td>
+      <td class="${r.cached_tokens ? "" : "dim"}">${r.cached_tokens == null ? "–" : nf0.format(r.cached_tokens)}</td><td>${nf0.format(r.output_tokens)}</td>
+      <td>${secondsText(r.ttft_s)}</td><td>${r.decode_tps == null ? "–" : nf0.format(r.decode_tps) + " tok/s"}</td>
+      <td>${esc(finish(r))}${r.count > 1 ? ` (${r.count} requests)` : ""}</td></tr>`).join("") + `</tbody></table>`;
+}
+
+function renderPositions(s) {
+  const rates = s.totals && s.totals.accept_per_pos ? s.totals.accept_per_pos : [];
+  barChart($("posChart"), rates);
+}
+
+function renderClients(s) {
+  const entries = Object.values(s.clients || {});
+  const sig = JSON.stringify(entries);
+  const box = $("clients");
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  if (!entries.length) { box.innerHTML = `<p class="hint">${s.station.mock ? "Mock mode does not touch any client configs." : "Checked at start."}</p>`; return; }
+  const mark = { ok: "check", error: "x", outdated: "warn", missing: "warn" };
+  box.innerHTML = entries.map((c) => `<div class="client" data-s="${esc(c.status)}">${icon(mark[c.status] || "dot")}
+    <div><b>${esc(c.client)}</b>: ${esc(c.detail)}<span>${esc(c.path)}</span></div></div>`).join("");
+}
+
+/* ---------- log ---------- */
+function appendLog(lines) {
+  const box = $("log");
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  for (const line of lines) {
+    if (line.progress && store.log.length && store.log[store.log.length - 1].progress) {
+      store.log.pop();
+      if (box.lastChild) box.removeChild(box.lastChild);
+    }
+    store.log.push(line);
+    const row = document.createElement("div");
+    row.className = line.level;
+    row.textContent = line.text;
+    box.appendChild(row);
+  }
+  while (store.log.length > 700) { store.log.shift(); box.removeChild(box.firstChild); }
+  applyLogFilter();
+  if (pinned) box.scrollTop = box.scrollHeight;
+}
+function applyLogFilter() {
+  const only = $("logFilter").checked;
+  for (const row of $("log").children) row.hidden = only && !(row.className === "warn" || row.className === "error");
+}
+
+/* ---------- charts ---------- */
+function niceMax(value) {
+  if (value <= 0) return 1;
+  const power = Math.pow(10, Math.floor(Math.log10(value)));
+  for (const step of [1, 1.5, 2, 3, 4, 5, 7.5, 10]) if (value <= step * power) return step * power;
+  return 10 * power;
+}
+const tip = $("tip");
+function showTip(x, y, html) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const box = tip.getBoundingClientRect();
+  tip.style.left = `${Math.min(window.innerWidth - box.width - 8, Math.max(8, x + 14))}px`;
+  tip.style.top = `${Math.max(8, y - box.height - 12)}px`;
+}
+const hideTip = () => { tip.style.display = "none"; };
+
+function lineChart(el, points, opts) {
+  const width = el.clientWidth, height = el.clientHeight;
+  if (!width || !height) return;
+  const axis = !!opts.axis;
+  const pad = axis ? { l: 34, r: 6, t: 8, b: 20 } : { l: 0, r: 0, t: 4, b: 4 };
+  const values = points.map((p) => p.v).filter((v) => v != null);
+  const max = opts.fixedMax || niceMax(Math.max(opts.minMax || 0, ...values, 1));
+  const x = (t) => pad.l + ((t - opts.from) / (opts.to - opts.from)) * (width - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - v / max) * (height - pad.t - pad.b);
+  let line = "", area = "", open = false, firstX = 0, lastX = 0;
+  for (const p of points) {
+    if (p.v == null) { if (open) { area += `L${lastX.toFixed(1)} ${y(0).toFixed(1)}Z`; open = false; } continue; }
+    const px = x(p.t), py = y(Math.min(p.v, max));
+    if (!open) { line += `M${px.toFixed(1)} ${py.toFixed(1)}`; area += `M${px.toFixed(1)} ${y(0).toFixed(1)}L${px.toFixed(1)} ${py.toFixed(1)}`; firstX = px; open = true; }
+    else { line += `L${px.toFixed(1)} ${py.toFixed(1)}`; area += `L${px.toFixed(1)} ${py.toFixed(1)}`; }
+    lastX = px;
+  }
+  if (open) area += `L${lastX.toFixed(1)} ${y(0).toFixed(1)}Z`;
+  let grid = "";
+  if (axis) {
+    for (const fraction of [0, .5, 1]) {
+      const gy = y(max * fraction);
+      grid += `<line x1="${pad.l}" x2="${width - pad.r}" y1="${gy}" y2="${gy}" stroke="var(--grid)" stroke-width="1"/>`
+        + `<text x="${pad.l - 6}" y="${gy + 4}" text-anchor="end">${nf0.format(max * fraction)}</text>`;
+    }
+    const minutes = Math.round((opts.to - opts.from) / 60);
+    grid += `<text x="${pad.l}" y="${height - 4}">${minutes} min ago</text><text x="${width - pad.r}" y="${height - 4}" text-anchor="end">now</text>`;
+  } else {
+    grid = `<line x1="0" x2="${width}" y1="${y(0)}" y2="${y(0)}" stroke="var(--grid)" stroke-width="1"/>`;
+  }
+  el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${grid}
+    <path d="${area}" fill="var(--data-soft)"/><path d="${line}" fill="none" stroke="var(--data)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <g class="hover" style="display:none"><line y1="${pad.t}" y2="${height - pad.b}" stroke="var(--ink-3)" stroke-width="1"/><circle r="4" fill="var(--data)" stroke="var(--panel)" stroke-width="2"/></g></svg>`;
+  el._chart = { points: points.filter((p) => p.v != null), x, y, max, unit: opts.unit };
+  if (!el._bound) {
+    el._bound = true;
+    el.addEventListener("mousemove", (event) => {
+      const chart = el._chart;
+      if (!chart || !chart.points.length) return;
+      const rect = el.getBoundingClientRect();
+      const mx = event.clientX - rect.left;
+      let best = chart.points[0], gap = Infinity;
+      for (const p of chart.points) { const d = Math.abs(chart.x(p.t) - mx); if (d < gap) { gap = d; best = p; } }
+      const hover = el.querySelector(".hover");
+      if (!hover) return;
+      el._hover = best.t;
+      hover.style.display = "";
+      const px = chart.x(best.t), py = chart.y(Math.min(best.v, chart.max));
+      hover.firstElementChild.setAttribute("x1", px); hover.firstElementChild.setAttribute("x2", px);
+      hover.lastElementChild.setAttribute("cx", px); hover.lastElementChild.setAttribute("cy", py);
+      showTip(event.clientX, event.clientY, `<b>${nf0.format(best.v)} ${esc(chart.unit)}</b><span>${clock(best.t)}</span>`);
+    });
+    el.addEventListener("mouseleave", () => { const hover = el.querySelector(".hover"); if (hover) hover.style.display = "none"; hideTip(); });
+  }
+}
+
+function barChart(el, rates) {
+  const width = el.clientWidth, height = el.clientHeight;
+  if (!width || !height) return;
+  const sig = `${width}x${height}:${rates.join(",")}`;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  if (!rates.length) { el.innerHTML = `<p class="empty">No draft rounds measured yet.</p>`; return; }
+  const pad = { l: 34, r: 4, t: 20, b: 22 };
+  const slot = (width - pad.l - pad.r) / rates.length;
+  const bar = Math.min(46, slot - 2);  /* 2px surface gap between neighbours */
+  const y = (v) => pad.t + (1 - v) * (height - pad.t - pad.b);
+  let svg = "";
+  for (const fraction of [0, .5, 1]) {
+    const gy = y(fraction);
+    svg += `<line x1="${pad.l}" x2="${width - pad.r}" y1="${gy}" y2="${gy}" stroke="var(--grid)" stroke-width="1"/><text x="${pad.l - 6}" y="${gy + 4}" text-anchor="end">${fraction * 100}%</text>`;
+  }
+  rates.forEach((rate, index) => {
+    const bx = pad.l + slot * index + (slot - bar) / 2, top = y(rate), h = Math.max(0, y(0) - top), r = Math.min(4, h);
+    svg += `<path data-i="${index}" d="M${bx} ${y(0)}V${top + r}q0 ${-r} ${r} ${-r}H${bx + bar - r}q${r} 0 ${r} ${r}V${y(0)}Z" fill="var(--data)"/>`
+      + `<text x="${bx + bar / 2}" y="${top - 6}" text-anchor="middle" style="fill:var(--ink-2)">${nf0.format(rate * 100)}</text>`
+      + `<text x="${bx + bar / 2}" y="${height - 5}" text-anchor="middle">${index + 1}</text>`
+      + `<rect data-i="${index}" x="${pad.l + slot * index}" y="${pad.t}" width="${slot}" height="${height - pad.t - pad.b}" fill="transparent"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Acceptance by draft position: ${rates.map((r, i) => `position ${i + 1} ${Math.round(r * 100)} percent`).join(", ")}">${svg}</svg>`;
+  el.onmousemove = (event) => {
+    const index = event.target.dataset ? event.target.dataset.i : undefined;
+    if (index === undefined) { hideTip(); return; }
+    showTip(event.clientX, event.clientY, `<b>${nf1.format(rates[index] * 100)}%</b><span>Draft token ${Number(index) + 1} of ${rates.length}</span>`);
+  };
+  el.onmouseleave = hideTip;
+}
+
+/* ---------- actions ---------- */
+async function act(path, body) {
+  try { await api(path, body || {}); } catch (error) { $("banner").textContent = `Action failed: ${error.message}`; $("banner").style.display = "block"; }
+  poll();
+}
+$("primary").addEventListener("click", () => {
+  const s = store.state;
+  if (!s) return;
+  if (["starting", "ready"].includes(s.state)) {
+    if (s.state === "ready" && s.live && s.live.running > 0 && !confirm("A request is running. Stop anyway?")) return;
+    act("/api/stop");
+  } else act("/api/start", { preset: $("preset").value });
+});
+async function startSetup() {
+  const field = $("setupLocation");
+  let message = "";
+  try {
+    const result = await api("/api/setup/start", { location: field ? field.value : "" });
+    message = result.ok ? "" : result.error;
+  } catch (error) { message = `Setup could not start: ${error.message}`; }
+  const box = $("setupStartError");
+  if (box) { box.textContent = message; box.hidden = !message; }
+  else if (message) { $("banner").textContent = message; $("banner").style.display = "block"; }
+  poll();
+}
+$("hero").addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.id === "setupLocation") startSetup(); });
+$("hero").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-act]");
+  if (button && button.dataset.act === "setup") { startSetup(); return; }
+  if (button && button.dataset.act === "setup-check") { act("/api/setup/check"); return; }
+  if (button && button.dataset.act === "setup-restart") {
+    if (confirm("Restart Windows now? Unsaved work in other programs will be lost.")) { store.quit = true; act("/api/setup/restart"); }
+    return;
+  }
+  if (button && button.dataset.act === "setup-cancel") {
+    if (confirm("Cancel setup? Completed steps are kept.")) act("/api/setup/cancel");
+    return;
+  }
+  if (button) { act("/api/start", { preset: $("preset").value, force: button.dataset.act === "force" }); return; }
+  const range = event.target.closest("[data-range]");
+  if (range) {
+    store.range = Number(range.dataset.range);
+    for (const b of $("hero").querySelectorAll("[data-range]")) b.setAttribute("aria-pressed", String(b === range));
+    if (store.state) renderSpeed(store.state);
+  }
+});
+$("quit").addEventListener("click", async () => {
+  const s = store.state;
+  const owns = s && ["starting", "ready"].includes(s.state) && !s.external;
+  if (owns && !confirm("Stop the model and quit Qwen Station?")) return;
+  if (s && s.setup && s.setup.state === "running" && !confirm("Setup is still running. Cancel it and quit Qwen Station?")) return;
+  store.quit = true;
+  try { await api("/api/quit", {}); } catch (error) { /* the process may already be gone */ }
+  document.body.innerHTML = `<div class="wrap"><div class="notice" style="margin-top:20vh"><h2>Qwen Station has quit</h2><p>The model is stopped and the VRAM is being freed. You can close this window.</p></div></div>`;
+  setTimeout(() => window.close(), 1200);
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-copy]");
+  if (!button) return;
+  navigator.clipboard.writeText($(button.dataset.copy).textContent).then(() => {
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = "Copy"; }, 1400);
+  });
+});
+$("logFilter").addEventListener("change", applyLogFilter);
+window.addEventListener("resize", () => { if (store.state) render(); });
+window.addEventListener("beforeunload", (event) => {
+  const s = store.state;
+  if (store.quit || !s) return;
+  if (s.setup && s.setup.state === "running") event.preventDefault();
+  if (s.station.close_action === "stop" && s.state === "ready" && !s.external && s.live && s.live.running > 0) event.preventDefault();
+});
+window.addEventListener("pagehide", () => { if (!store.quit) navigator.sendBeacon(`/api/bye?token=${encodeURIComponent(TOKEN)}`); });
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

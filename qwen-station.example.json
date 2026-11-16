@@ -1,0 +1,6 @@
+{
+  "preset": "262k",
+  "close_action": "stop",
+  "lan": false,
+  "fit_context": true
+}

@@ -1,0 +1,518 @@
+"""The station process: HTTP API for the dashboard, pollers, window handling, entry point."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import secrets
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import webbrowser
+from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from . import __version__, installer, metrics
+from .config import (MODEL_ID, MODEL_SUBTITLE, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
+                     resource_path)
+from .gpu import GpuMonitor
+from .setup import Setup, uninstall_message
+from .supervisor import Supervisor, http_get
+
+LOG = logging.getLogger("qwen-station")
+SAMPLE_SECONDS = 1.0
+HISTORY = 1800  # 30 minutes
+MAX_BODY = 64 * 1024
+
+
+class Station:
+    def __init__(self, config: Config, supervisor: Supervisor | None = None) -> None:
+        self.config = config
+        self.token = secrets.token_urlsafe(24)
+        self.supervisor = supervisor or Supervisor(config)
+        self.setup = Setup(config, self.supervisor.log)
+        self.setup.on_done = self._start_or_idle
+        self.gpu = GpuMonitor(config.gpu_match)
+        self.tracker = metrics.Tracker()
+        self.samples: deque[dict] = deque(maxlen=HISTORY)
+        self.metrics_error: str | None = None
+        self.quit_event = threading.Event()
+        self.started = time.time()
+        self.last_poll = 0.0
+        self.bye_at = 0.0
+        self.window_opened_at = 0.0
+        self.browser: subprocess.Popen | None = None
+        self.browser_tracked: bool | None = None  # None: still deciding, False: handed off or no process
+        self._generation = -1
+        self._metric_failures = 0
+        self._lock = threading.Lock()
+        self.httpd: ThreadingHTTPServer | None = None
+
+    # ---- polling -----------------------------------------------------------------
+
+    def start_background(self) -> None:
+        self.gpu.start()
+        threading.Thread(target=self._poll_loop, name="poller", daemon=True).start()
+
+    def _poll_loop(self) -> None:
+        tick = 0
+        while not self.quit_event.is_set():
+            started = time.time()
+            try:
+                self.poll_once(tick)
+            except Exception:  # keep sampling whatever a single tick ran into
+                LOG.exception("poll tick failed")
+            tick += 1
+            self.quit_event.wait(max(0.05, SAMPLE_SECONDS - (time.time() - started)))
+
+    def poll_once(self, tick: int = 0) -> None:
+        supervisor = self.supervisor
+        state = supervisor.state
+        base = f"http://127.0.0.1:{self.config.api_port}"
+        if supervisor.generation != self._generation:
+            self._generation = supervisor.generation
+            self.tracker.reset()
+            self._metric_failures = 0
+        live = None
+        if state == "starting" and tick % 2 == 0:
+            try:
+                if http_get(f"{base}/health", timeout=1.5)[0] == 200:
+                    supervisor.mark_ready()
+            except (OSError, urllib.error.URLError):
+                pass
+        elif state == "ready":
+            try:
+                status, body = http_get(f"{base}/metrics", timeout=2.0)
+                if status != 200:
+                    raise OSError(f"HTTP {status}")
+                live = self.tracker.update(metrics.extract(metrics.parse_prometheus(body.decode("utf-8", "replace"))))
+                self.metrics_error = None
+                self._metric_failures = 0
+            except (OSError, urllib.error.URLError, ValueError) as exc:
+                self._metric_failures += 1
+                self.metrics_error = f"/metrics does not respond: {exc}"
+                if supervisor.external and self._metric_failures >= 5:
+                    supervisor.log.add("The server started elsewhere no longer responds.", "warn")
+                    supervisor.external_gone()
+        card = self.gpu.latest
+        fresh = card is not None and time.time() - card.get("t", 0) < 5
+        sample = {
+            "t": round(time.time(), 3),
+            "tps": live["tps"] if live else None,
+            "running": live["running"] if live else None,
+            "kv": live["kv"] if live else None,
+            "util": card["util"] if fresh else None,
+            "vram": card["mem_used"] if fresh else None,
+            "power": card["power"] if fresh else None,
+            "temp": card["temp"] if fresh else None,
+        }
+        with self._lock:
+            self.samples.append(sample)
+
+    # ---- state for the dashboard ---------------------------------------------------
+
+    def state_json(self, since: float = 0.0, log_seq: int = 0, request_seq: int = 0) -> dict:
+        supervisor = self.supervisor
+        snapshot = supervisor.snapshot()
+        ready = snapshot["state"] == "ready"
+        with self._lock:
+            samples = [sample for sample in self.samples if sample["t"] > since]
+        card = self.gpu.latest
+        preset = PRESETS[snapshot["preset"]]
+        return {
+            "now": round(time.time(), 3),
+            "station": {"version": __version__, "mock": self.config.mock, "close_action": self.config.close_action,
+                        "mode": self.config.mode, "root": self.config.root, "distro": self.config.distro,
+                        "lan": self.config.lan,
+                        "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
+            "model": {"id": MODEL_ID, "title": MODEL_TITLE, "subtitle": MODEL_SUBTITLE,
+                      "context": snapshot["context"],
+                      "max_seqs": preset["max_seqs"]},
+            "api": {"base_url": self.config.api_base_url, "model": MODEL_ID},
+            "presets": {name: {key: values[key] for key in ("label", "context", "max_seqs", "note")}
+                        for name, values in PRESETS.items()},
+            **snapshot,
+            "setup": self.setup.snapshot(),
+            "phases": supervisor.phases() if snapshot["state"] in ("starting", "preflight") else [],
+            "live": self.tracker.latest if ready else None,
+            "totals": self.tracker.totals() if ready else None,
+            "metrics_error": self.metrics_error if ready else None,
+            "gpu": card if card and time.time() - card.get("t", 0) < 5 else None,
+            "gpu_error": self.gpu.error,
+            "samples": samples,
+            "requests": [row for row in self.tracker.requests if row["seq"] > request_seq] if ready else [],
+            "request_seq": self.tracker.request_seq,
+            "log": supervisor.log.since(log_seq),
+            "log_seq": supervisor.log.seq,
+        }
+
+    # ---- window --------------------------------------------------------------------
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.config.station_port}/"
+
+    def open_window(self) -> None:
+        self.window_opened_at = time.time()
+        self.browser, self.browser_tracked = launch_window(self.url)
+        if self.browser is not None:
+            threading.Thread(target=self._classify_browser, daemon=True).start()
+
+    def _classify_browser(self) -> None:
+        # A browser that exits right away handed the window to an already running instance;
+        # then only the page itself can tell us when it closes.
+        try:
+            self.browser.wait(timeout=8)
+            self.browser_tracked = False
+        except subprocess.TimeoutExpired:
+            self.browser_tracked = True
+
+    def note_poll(self) -> None:
+        self.last_poll = time.time()
+
+    def window_gone(self) -> bool:
+        if not self.window_opened_at:
+            return False
+        now = time.time()
+        browser_alive = self.browser is not None and self.browser.poll() is None
+        if not self.last_poll:  # the page never loaded
+            return now - self.window_opened_at > 120 and not browser_alive
+        idle = now - self.last_poll
+        if idle <= 6:
+            return False
+        if self.bye_at >= self.last_poll:  # the page said goodbye and did not come back (not a reload)
+            return True
+        if self.browser_tracked:
+            return not browser_alive
+        if self.browser_tracked is None:
+            return False
+        return idle > 150  # a hidden tab still polls about once a minute
+
+    # ---- lifecycle -----------------------------------------------------------------
+
+    def serve(self) -> None:
+        handler = type("Handler", (_Handler,), {"station": self})
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", self.config.station_port), handler)
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, name="http", daemon=True).start()
+
+    def shutdown(self) -> None:
+        self.quit_event.set()
+        try:
+            self.setup.cancel()
+            self.supervisor.shutdown()
+        finally:
+            self.gpu.stop()
+            if self.httpd is not None:
+                self.httpd.shutdown()
+                self.httpd.server_close()
+
+    def _boot(self) -> None:
+        try:
+            if self.setup.check() == "needed" and self.setup.reason == "app":
+                self.setup.install_app_only()
+            self.setup.resume_after_restart()
+            if self.setup.state in ("off", "done"):
+                self._start_or_idle()
+        except Exception:
+            LOG.exception("boot failed")
+            self.supervisor.log.add("The installation check crashed. See station.log for details.", "error")
+            self.setup.state = "needed"
+
+    def _start_or_idle(self) -> None:
+        if self.quit_event.is_set():
+            return
+        if self.config.autostart:
+            self.supervisor.start()
+        elif not self.config.mock:
+            self.supervisor.refresh_clients(write=False)
+
+    def run(self) -> int:
+        self.serve()
+        self.start_background()
+        if self.config.mode == "managed" and not self.config.mock:
+            self.setup.state = "checking"  # shown until the look into the distribution is back
+        if self.config.open_window:
+            self.open_window()
+        threading.Thread(target=self._boot, name="boot", daemon=True).start()
+        try:
+            while not self.quit_event.wait(1.0):
+                if self.config.close_action == "stop" and self.window_gone():
+                    LOG.info("window closed, shutting down")
+                    break
+        except KeyboardInterrupt:
+            pass
+        self.shutdown()
+        return 0
+
+
+def launch_window(url: str) -> tuple[subprocess.Popen | None, bool | None]:
+    """Open the dashboard as its own app window (Edge or Chrome), else in the default browser."""
+    roots = [os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")]
+    relative = (r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe")
+    for tail in relative:
+        for root in roots:
+            executable = Path(root) / tail if root else None
+            if executable and executable.is_file():
+                profile = data_dir() / "window-profile"
+                arguments = [str(executable), f"--app={url}", f"--user-data-dir={profile}", "--no-first-run",
+                             "--no-default-browser-check", "--window-size=1340,920"]
+                try:
+                    return subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL), None
+                except OSError:
+                    LOG.exception("could not start %s", executable)
+    webbrowser.open(url)
+    return None, False
+
+
+class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = f"qwen-station/{__version__}"
+    station: Station
+
+    def log_message(self, format: str, *args) -> None:
+        pass
+
+    def _host_ok(self) -> bool:
+        # Only answer requests addressed to this loopback endpoint (blocks DNS rebinding).
+        port = self.station.config.station_port
+        return self.headers.get("Host", "") in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8") -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, status: int, value) -> None:
+        self._send(status, json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    def do_GET(self) -> None:
+        if not self._host_ok():
+            self._send(403, b"Forbidden", "text/plain")
+            return
+        url = urlsplit(self.path)
+        query = parse_qs(url.query)
+        if url.path == "/":
+            page = resource_path("dashboard.html").read_text(encoding="utf-8").replace("__STATION_TOKEN__", self.station.token)
+            self.send_response(200)
+            body = page.encode("utf-8")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy",
+                             "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                             "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+            self.end_headers()
+            self.wfile.write(body)
+        elif url.path == "/api/ping":
+            self._json(200, {"app": "qwen-station", "version": __version__})
+        elif url.path == "/api/state":
+            if self.headers.get("X-Station-Token") == self.station.token:
+                self.station.note_poll()
+
+            def number(name: str) -> float:
+                try:
+                    return float(query.get(name, ["0"])[0])
+                except ValueError:
+                    return 0.0
+
+            self._json(200, self.station.state_json(number("since"), int(number("log")), int(number("req"))))
+        elif url.path == "/favicon.ico":
+            self._send(204, b"", "image/x-icon")
+        else:
+            self._send(404, b"Not found", "text/plain")
+
+    def do_POST(self) -> None:
+        if not self._host_ok():
+            self._send(403, b"Forbidden", "text/plain")
+            return
+        url = urlsplit(self.path)
+        station = self.station
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            self._send(400, b"Bad request", "text/plain")
+            return
+        raw = self.rfile.read(length) if length else b""
+        if url.path == "/api/bye":
+            # Sent by the page while it unloads. A beacon cannot carry headers, so the token is in the query.
+            if parse_qs(url.query).get("token", [""])[0] == station.token:
+                station.bye_at = time.time()
+            self._send(204, b"")
+            return
+        # The token lives only in the served page; other origins cannot read it or set this header.
+        if self.headers.get("X-Station-Token") != station.token:
+            self._send(403, b"Forbidden", "text/plain")
+            return
+        try:
+            payload = json.loads(raw) if raw else {}
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            self._json(400, {"error": "Body must be a JSON object"})
+            return
+        supervisor = station.supervisor
+        if url.path == "/api/setup/start":
+            error = station.setup.start(str(payload.get("location") or ""))
+            self._json(200, {"ok": not error, "error": error})
+        elif url.path == "/api/setup/check":
+            if station.setup.state in ("needed", "failed", "restart"):
+                station.setup.state = "checking"
+                threading.Thread(target=station.setup.check, name="setup-check", daemon=True).start()
+            self._json(200, {"ok": True})
+        elif url.path == "/api/setup/restart":
+            if station.setup.state != "restart":
+                self._json(409, {"error": "No restart needed"})
+                return
+            installer.restart_windows()
+            self._json(200, {"ok": True})
+            station.quit_event.set()
+        elif url.path == "/api/setup/cancel":
+            threading.Thread(target=station.setup.cancel, name="setup-cancel", daemon=True).start()
+            self._json(200, {"ok": True})
+        elif url.path == "/api/start":
+            if station.setup.state not in ("off", "done"):
+                self._json(409, {"error": "Finish the setup first"})
+                return
+            preset = payload.get("preset")
+            if preset is not None and preset not in PRESETS:
+                self._json(400, {"error": "Unknown preset"})
+                return
+            self._json(200, {"ok": supervisor.start(preset, force=bool(payload.get("force")))})
+        elif url.path == "/api/stop":
+            threading.Thread(target=supervisor.stop, name="stop", daemon=True).start()
+            self._json(200, {"ok": True})
+        elif url.path == "/api/quit":
+            self._json(200, {"ok": True})
+            station.quit_event.set()
+        else:
+            self._send(404, b"Not found", "text/plain")
+
+
+# ---- entry point -------------------------------------------------------------------
+
+
+def _message_box(text: str, title: str = "Qwen Station", icon: int = 0x10) -> None:
+    if sys.stdout is not None and sys.stdout.isatty():
+        print(text)
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, title, icon)
+    except Exception:
+        LOG.error(text)
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _running_instance(port: int) -> bool:
+    try:
+        status, body = http_get(f"http://127.0.0.1:{port}/api/ping", timeout=1.5)
+        return status == 200 and json.loads(body).get("app") == "qwen-station"
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="Qwen-Station", description="Starts Qwen3.8 on vLLM and shows a live monitor.")
+    parser.add_argument("--config", help="Path to a qwen-station.json")
+    parser.add_argument("--root", help="Folder with the models and start scripts")
+    parser.add_argument("--preset", choices=sorted(PRESETS))
+    parser.add_argument("--lan", action="store_true", default=None, help="Share the API on the LAN (0.0.0.0 plus Windows forwarding)")
+    parser.add_argument("--port", type=int, dest="station_port", help="Port of the dashboard")
+    parser.add_argument("--api-port", type=int, dest="api_port", help="Port of the vLLM API")
+    parser.add_argument("--no-autostart", action="store_false", dest="autostart", default=None)
+    parser.add_argument("--no-window", action="store_false", dest="open_window", default=None)
+    parser.add_argument("--no-register-clients", action="store_false", dest="register_clients", default=None,
+                        help="Leave the OpenCode and Pi entries alone (for experiments)")
+    parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
+                        help="Do not shrink the context automatically when VRAM is short")
+    parser.add_argument("--keep", action="store_const", const="keep", dest="close_action", default=None,
+                        help="Keep the model running when the window closes")
+    parser.add_argument("--mock", action="store_true", default=None, help="Fake server instead of the GPU, for trying things out")
+    parser.add_argument("--extra-args", dest="extra_args", help="Extra arguments for `vllm serve`")
+    parser.add_argument("--vllm-prefix", dest="vllm_prefix", help="venv with vLLM, for example /opt/vllm-0.32.0")
+    parser.add_argument("--model-base", dest="model_base", help="WSL folder with the target and the drafter")
+    parser.add_argument("--extra-env", dest="extra_env", help="KEY=VALUE pairs for the start scripts")
+    parser.add_argument("--check", action="store_true", help="Check the requirements and client entries, then exit")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Remove the app, its shortcuts and its entry in the Windows settings")
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--mock-server", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--mock-speed", type=float, default=1.0, help=argparse.SUPPRESS)
+    parser.add_argument("--mock-context", type=int, default=262144, help=argparse.SUPPRESS)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.mock_server is not None:
+        from . import mock
+        return mock.serve(args.mock_server, args.mock_speed, args.mock_context)
+    if args.version:
+        _message_box(f"Qwen Station {__version__}", icon=0x40)
+        return 0
+    logging.basicConfig(filename=str(data_dir() / "station.log"), level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        overrides = {key: getattr(args, key) for key in
+                     ("root", "preset", "lan", "station_port", "api_port", "autostart", "open_window", "close_action",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context",
+                      "register_clients")}
+        config = load_config(args.config, overrides)
+        if config.mock:
+            if args.api_port is None:
+                config.api_port = _free_port()
+            if args.station_port is None:
+                config.station_port = 8011
+        if args.uninstall:
+            # The message first: the installed exe can only be deleted once this process has ended.
+            _message_box(uninstall_message(config), icon=0x40)
+            installer.uninstall_app()
+            return 0
+        station = Station(config)
+        if args.check:
+            supervisor = station.supervisor
+            checks = supervisor.run_preflight(supervisor.probe_api()[0])
+            supervisor.refresh_clients(write=False)
+            report = {"mode": config.mode, "root": config.root, "distro": config.distro,
+                      "setup": station.setup.check(), "preflight": checks, "gpu_processes": supervisor.gpu_processes,
+                      "clients": supervisor.clients}
+            if sys.stdout is not None:
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if all(check["ok"] for check in checks) else 1
+        if _running_instance(config.station_port):
+            if config.open_window:
+                launch_window(f"http://127.0.0.1:{config.station_port}/")  # already running: just show it
+            return 0
+        return station.run()
+    except OSError as exc:
+        LOG.exception("startup failed")
+        _message_box(f"Qwen Station could not start:\n{exc}\n\nIs the port of the dashboard already in use?")
+        return 1
+    except (ValueError, json.JSONDecodeError) as exc:
+        LOG.exception("configuration error")
+        _message_box(f"Error in the config:\n{exc}")
+        return 2
+    except Exception as exc:
+        LOG.exception("fatal")
+        _message_box(f"Qwen Station crashed:\n{exc!r}\n\nDetails: {data_dir() / 'station.log'}")
+        return 3

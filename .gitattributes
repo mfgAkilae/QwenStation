@@ -1,0 +1,5 @@
+# The engine scripts run in Linux, whatever the checkout platform is.
+*.sh text eol=lf
+*.env text eol=lf
+*.py text eol=lf
+*.png binary

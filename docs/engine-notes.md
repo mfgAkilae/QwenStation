@@ -80,6 +80,27 @@ Two costs: a round verifies more tokens (65 rounds per second with 7, 60 with 15
 and every extra draft token needs one more state snapshot per Mamba layer in the KV pool, 0.16 GiB or about
 5,400 tokens of context. Qwen Station sizes the pool for the setting.
 
+**Vision is off unless asked for, and has a cache of its own.** The checkpoint ships its image encoder
+(`model.visual`, 27 layers, bf16). `serve.sh` sets `--limit-mm-per-prompt` to 0 for images and video, and vLLM
+then does not load the encoder: 18.02 instead of 18.88 GiB for the model. With the setting `vision`, Qwen
+Station appends `--limit-mm-per-prompt.image 4 --limit-mm-per-prompt.video 0`; the start script puts extra
+arguments last and the last one wins, so the engine needs no change. Two things had to be found out, both on
+2026-11-17:
+
+- vLLM keys its cache of compiled graphs without the multimodal settings (`limit_mm_per_prompt` is on the list
+  of ignored factors in `ModelConfig.compute_hash`). With images on, the model is called with embeddings
+  instead of token ids, so a graph compiled in text-only mode fails at the first run of the engine with
+  `'NoneType' object has no attribute 'size'`. Qwen Station therefore sets `VLLM_CACHE_ROOT` to
+  `cache/vllm-vision` below the engine folder when vision is on. The verified kernel tuning arrives there too,
+  because the seed patch writes to whatever path vLLM computes.
+- Memory: 0.86 GiB for the weights, up to 0.75 GiB while the largest image is read. With the context forced to
+  the same size as without vision, the card ran full, Windows paged GPU memory, and plain text got slower:
+  259 instead of 328 tok/s for code, 147 instead of 372 behind 33K tokens, the cold read of 33K tokens 20
+  instead of 4 seconds. With 1.7 GiB reserved the speed of text is unchanged.
+
+The DFlash2 drafter is text-only; vLLM says so at the start ("Embeddings from the target model will not be
+passed to the drafter") and falls back to drafting from the text alone. XQA stays the decode kernel.
+
 ## Tried and dropped
 
 - **B12X** (`b12x` 1.5.1, the version vLLM 0.32 pins; measured 2026-11-17 in rounds per second, which do not

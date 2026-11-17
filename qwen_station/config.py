@@ -29,6 +29,9 @@ OUTPUT_LIMIT = 32768
 # Draft tokens per round of the DFlash2 drafter. 7 is its trained block; more helps predictable text
 # (reasoning, code) and costs KV memory, so context. Measured up to 15, see docs/engine-notes.md.
 DEFAULT_DRAFT_TOKENS = 7
+# With vision on, a request may carry this many images. The start script switches images off by default,
+# and vLLM then does not load the image encoder at all.
+VISION_IMAGES = 4
 LOCAL_HOST = "127.0.0.1"  # the API answers this machine only
 ANY_HOST = "0.0.0.0"      # the API listens on every network interface
 API_KEY_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{8,128}")  # what fits into an Authorization header as it is
@@ -98,6 +101,7 @@ class Config:
     open_window: bool = True
     fit_context: bool = True  # shrink the context when too little VRAM is free, instead of paging
     draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
+    vision: bool = False  # load the image encoder: requests may contain images, at the cost of some VRAM
     extra_args: str = ""  # appended to the `vllm serve` command line, for experiments
     vllm_prefix: str = ""  # venv to run, e.g. /opt/vllm-0.32.0; empty: the start script's default
     model_base: str = ""  # WSL folder holding target and drafter; empty: the Windows folder via /mnt
@@ -221,6 +225,7 @@ _FILE_KEYS = {
     "open_window": bool,
     "fit_context": bool,
     "draft_tokens": int,
+    "vision": bool,
     "extra_args": str,
     "vllm_prefix": str,
     "model_base": str,

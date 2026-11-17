@@ -148,7 +148,8 @@ class Station:
                         "root": self.config.root, "distro": self.config.distro,
                         "lan": self.config.lan,
                         "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
-            "model": {"id": MODEL_ID, "title": MODEL_TITLE, "subtitle": MODEL_SUBTITLE,
+            "model": {"id": MODEL_ID, "title": MODEL_TITLE, "vision": self.config.vision,
+                      "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else ""),
                       "context": snapshot["context"],
                       "max_seqs": preset["max_seqs"]},
             # The key itself never leaves the app again once it is saved; a hint tells that one is set.
@@ -610,6 +611,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Leave the OpenCode and Pi entries alone (for experiments)")
     parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
                         help="Do not shrink the context automatically when VRAM is short")
+    parser.add_argument("--vision", action="store_true", default=None,
+                        help="Load the image encoder, so requests may contain images (costs VRAM, so context)")
     parser.add_argument("--draft-tokens", type=int, dest="draft_tokens",
                         help="Draft tokens per round (default 7). More speeds up reasoning and code, and costs context")
     parser.add_argument("--keep", action="store_const", const="keep", dest="close_action", default=None,
@@ -648,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {key: getattr(args, key) for key in
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
-                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision",
                       "register_clients")}
         config = load_config(args.config, overrides)
         if config.mock:

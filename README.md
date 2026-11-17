@@ -4,7 +4,7 @@ One file that installs and runs Qwen3.8 27B on a single RTX 5090, serves an Open
 what the model is doing. For Windows and for Linux.
 
 - **Model:** Qwen3.8 27B as NVFP4 (Gittensor build for the RTX 5090), FP8 KV cache, DFlash2 drafter for
-  speculative decoding
+  speculative decoding. It can read images too; that is an option, because it costs context.
 - **Engine:** vLLM 0.32.0 with five small patches and verified kernel tuning. On Windows it runs in its own
   WSL distribution, on Linux in one folder of your user.
 - **API:** `http://127.0.0.1:8000/v1`, model `qwen38-gittensor-dflash`. For this computer only and without a
@@ -162,6 +162,7 @@ The **Settings** button in the window opens them:
   settings, the app does not show it again; you can only replace or remove it. Clients send the key with every
   request (`Authorization: Bearer <key>`, the API key field of an OpenAI-compatible client). Without a key,
   anyone who can reach the address can use the model, so set one before you share the API.
+- **Vision:** switches the model's image encoder on, see [Vision](#vision).
 - The API port, draft tokens per round, the automatic context reduction, the start of the model with the app,
   what happens when the window closes, the registration in OpenCode and Pi, the port of the dashboard, and
   extra arguments and environment for experiments.
@@ -213,6 +214,7 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 - `api_key`: empty (default, no key) or 8 to 128 characters: letters, digits and `. _ ~ + / = -`. In the file
   you can also set a key of your own.
 - `fit_context`: `false` switches the automatic context reduction off.
+- `vision`: `true` loads the image encoder, so requests may contain images. See [Vision](#vision).
 - `draft_tokens`: how many tokens the drafter proposes per round, 7 by default, up to 15. More makes reasoning
   17 to 30 percent faster and costs about 5,400 tokens of context each, see [Speed](#speed). Single-slot presets only.
 - `extra_args`: appended to `vllm serve`. `extra_env`: `KEY=VALUE` pairs for the start script, for example
@@ -258,6 +260,37 @@ The three numbers per cell are tok/s for a short prompt, behind 33K and behind 1
 30 percent with 11 or 15 draft tokens at every context size. Code gains with short prompts and varies behind long
 contexts (these are single runs; code differs between runs). Prose loses up to 14 percent, because it keeps few
 tokens anyway and the rounds get slower. The default stays 7: the largest context and the best speed for prose.
+
+### Vision
+
+The checkpoint contains an image encoder (27 layers, not quantized). By default it is not loaded. With
+**Vision** switched on in the settings (or `--vision`), a request may contain up to 4 images, in the usual
+OpenAI format (`image_url` parts in the message, as a `data:` URL or a link). Video stays off.
+
+Measured on 2026-11-17 (RTX 5090, context limit 163,840 tokens):
+
+| Image | Tokens in the prompt | Time to the first token | VRAM while it is read |
+|---|---|---|---|
+| 1024 x 1024 | 1,076 | 0.2 s | no change |
+| 1920 x 1080 | 2,092 | 0.4 s | no change |
+| 3840 x 2160 (a 4K screenshot) | 8,212 | 2.0 s | +0.54 GiB |
+| 4096 x 4096, the largest; bigger images are scaled down to it | 16,436 | 10.5 s | +0.75 GiB |
+
+What it costs:
+
+- **Context.** The encoder's weights take 0.86 GiB of VRAM and reading a large image up to 0.75 GiB more. Qwen
+  Station reserves 1.7 GiB for vision, so the context gets one or two steps of 32,768 tokens smaller: with
+  30.8 GiB free, 196,608 instead of 262,144 tokens.
+- **Speed of text: nothing.** With vision on and no image in the request, the speed is the same (short prompts:
+  314 tok/s for code and 451 for reasoning, against 328 and 437 without vision; behind 33K tokens 365 against 372).
+- **Speed of answers about images:** about 200 tok/s after a small image, 110 to 130 after 16,000 image tokens.
+  The drafter does not see the image, so fewer of its tokens are kept.
+- **The first start with vision** takes about two and a half minutes instead of one: vLLM compiles the model
+  once more, into a cache of its own.
+
+In a test the model named the colours and positions in a generated picture, kept two images apart in their
+order, and read the speed, the GPU and the VRAM figure off a screenshot of the dashboard. With vision on, the
+entries for OpenCode and Pi say that the model takes images.
 
 ### Measure it yourself
 
@@ -318,7 +351,7 @@ served page, so other websites cannot control the app.
 ```powershell
 python run-station.py --mock            # fake server instead of the model: the dashboard without a GPU
 python run-station.py --check           # state of the installation as JSON
-python -m unittest discover -s tests    # 113 tests; they start the mock server as a real subprocess
+python -m unittest discover -s tests    # 118 tests; they start the mock server as a real subprocess
 .\build-exe.ps1 -Release                # dist\Qwen-Station-Setup-<version>.exe with its SHA256 file
 python3 build-linux.py                  # on Linux: dist/Qwen-Station-<version>-x86_64.AppImage with its SHA256 file
 ```

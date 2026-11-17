@@ -18,7 +18,7 @@ from .config import ANY_HOST, API_KEY_PATTERN, DEFAULT_DRAFT_TOKENS, LOCAL_HOST,
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Read when the model starts: a change waits for the next start while the model runs.
-MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "fit_context", "extra_args", "extra_env")
+MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "vision", "fit_context", "extra_args", "extra_env")
 # Read all the time: a change applies at once.
 APP_KEYS = ("autostart", "close_action", "register_clients")
 # The dashboard's own port: the running app keeps it until it is started again.
@@ -26,7 +26,7 @@ RESTART_KEYS = ("station_port",)
 EDITABLE = MODEL_KEYS + APP_KEYS + RESTART_KEYS
 
 KINDS = {"api_host": str, "api_port": int, "api_key": str, "station_port": int, "draft_tokens": int,
-         "fit_context": bool,
+         "fit_context": bool, "vision": bool,
          "extra_args": str, "extra_env": str, "autostart": bool, "close_action": str, "register_clients": bool}
 MIN_PORT = 1024
 MAX_TEXT = 2000

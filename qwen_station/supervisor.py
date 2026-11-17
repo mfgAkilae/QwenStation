@@ -20,7 +20,7 @@ from pathlib import Path
 from . import clients, gpu
 from .relay import Relay
 from .config import (ANY_HOST, DEFAULT_DRAFT_TOKENS, DRAFTER_DIR, KEY_FILE, LOCAL_HOST, MODEL_ID, PRESETS, TARGET_DIR,
-                     WRAPPER_SCRIPT, Config,
+                     VISION_IMAGES, WRAPPER_SCRIPT, Config,
                      app_dir, data_dir,
                      resource_path)
 
@@ -42,6 +42,11 @@ KV_PER_DRAFT_TOKEN_GIB = 0.17
 # Free VRAM the server needs beside its KV pool: weights and runtime (20.4 GiB measured) plus a margin.
 # With less, Windows pages GPU memory and the speed drops to a quarter (prefill 1,825 against 8,800 tok/s).
 FIT_RESERVE_GIB = 21.0
+# What vision adds to that. Measured 2026-11-17: the image encoder's weights take 0.86 GiB (vLLM reports
+# 18.88 instead of 18.02 GiB for the model), and reading the largest image (16.7 million pixels, 16,384 tokens)
+# needs another 0.75 GiB for a moment, a 4K screenshot 0.54 GiB. Without this reserve the card ran full with a
+# large image, Windows paged, and text got 20 to 55 percent slower.
+VISION_RESERVE_GIB = 1.7
 MIN_FIT_CONTEXT = 65536
 # Coarse steps on purpose: every distinct context is a new server configuration, and each of those runs
 # once without the verified kernel tuning (see RETUNE_WARNING). Six sizes instead of fifty.
@@ -76,6 +81,9 @@ RETUNE_WARNING = ("FlashInfer measured the kernels for this configuration again.
 # The dashboard polls these once a second; without the filter they bury the log.
 _POLL_NOISE = re.compile(r'"GET /(?:metrics|health|ping) HTTP')
 QUIET_POLL_ARGS = "EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health"
+# The start script ends its command line with these extra arguments, and the last --limit-mm-per-prompt wins.
+# The dotted form needs no quotes, which would not survive the way through wsl.exe.
+VISION_ARGS = f"--limit-mm-per-prompt.image {VISION_IMAGES} --limit-mm-per-prompt.video 0"
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _PREFIX = re.compile(r"^\((?:APIServer|EngineCore)[^)]*\)\s*")
 
@@ -189,16 +197,25 @@ class WslLauncher:
         if abs(config.gpu_memory_utilization - 0.92) > 1e-9:
             env.append(f"GPU_UTIL={config.gpu_memory_utilization}")
         # The wrapper word-splits EXTRA_ARGS onto the vllm command line.
-        env.append(f"{QUIET_POLL_ARGS} {config.extra_args}".strip())
+        env.append(" ".join(part for part in (QUIET_POLL_ARGS, VISION_ARGS if config.vision else "",
+                                              config.extra_args) if part))
         if config.vllm_prefix:
             env.append(f"VLLM_PREFIX={config.vllm_prefix}")
         if config.model_base:
             env.append(f"MODEL_BASE={config.model_base}")
         if config.draft_tokens != DEFAULT_DRAFT_TOKENS and preset["max_seqs"] == 1:
             env.append(f"SPEC_TOKENS={config.draft_tokens}")
+        if config.vision:
+            # vLLM keys its cache of compiled graphs without the multimodal settings, but with images on the
+            # model is called with embeddings instead of token ids. A graph compiled in text-only mode then
+            # fails at the first run ('NoneType' object has no attribute 'size'). So: a cache of its own.
+            env.append(f"VLLM_CACHE_ROOT={self.vision_cache()}")
         env.extend(f"{key}={value}" for key, value in preset.get("env", {}).items())  # e.g. another target
         env.extend(config.extra_env.split())  # KEY=VALUE pairs for the start scripts, e.g. KV_DTYPE=nvfp4
         return [*self.wsl(), "env", *env, *self.script()]
+
+    def vision_cache(self) -> str:
+        return "/var/tmp/qwen-station-vllm-vision"  # the hand-built folder may sit on a slow Windows drive
 
     def server_host(self) -> str:
         # Inside WSL the server always listens on 127.0.0.1, which Windows forwards to its own 127.0.0.1.
@@ -291,6 +308,9 @@ class ManagedLauncher(WslLauncher):
 
     def wsl(self) -> list[str]:
         return ["wsl.exe", "-d", self.config.distro, "-u", "root", "--exec"]
+
+    def vision_cache(self) -> str:
+        return f"{self.config.prefix}/cache/vllm-vision"
 
     def models(self) -> str:
         return self.config.model_base or f"{self.config.prefix}/models"
@@ -511,14 +531,17 @@ class Supervisor:
                                "detail": f"Cannot read nvidia-smi: {exc}"})
             if row and row.get("mem_total") and row.get("mem_free") is not None:
                 # The model ends up holding about what vLLM budgets (measured 29.6 GiB at 0.92 x 31.8 GiB).
-                need = math.ceil(self.config.gpu_memory_utilization * row["mem_total"])
+                vision = self.config.vision
+                need = math.ceil(self.config.gpu_memory_utilization * row["mem_total"]
+                                 + (VISION_RESERVE_GIB * 1024 if vision else 0))
                 enough = row["mem_free"] >= need
                 preset = PRESETS[self.preset]
                 drafts = self.config.draft_tokens if preset["max_seqs"] == 1 else DEFAULT_DRAFT_TOKENS
                 more_drafts = drafts > DEFAULT_DRAFT_TOKENS  # the preset's KV pool is sized for the default
-                if self.config.fit_context and preset["max_seqs"] == 1 and (not enough or more_drafts):
+                if self.config.fit_context and preset["max_seqs"] == 1 and (not enough or more_drafts or vision):
                     fitted = fit_context(row["mem_free"], preset["context"],
-                                         preset.get("fit_reserve_gib", FIT_RESERVE_GIB), drafts)
+                                         preset.get("fit_reserve_gib", FIT_RESERVE_GIB)
+                                         + (VISION_RESERVE_GIB if vision else 0), drafts)
                 elif more_drafts:
                     fitted = (preset["context"], kv_pool_bytes(preset["context"], drafts))
                 reduced = fitted is not None and fitted[0] < preset["context"]
@@ -530,9 +553,11 @@ class Supervisor:
                                "warn": tight or reduced, "blocking": False,
                                "free_mib": row["mem_free"], "need_mib": need, "detail": detail})
                 if reduced and enough:
-                    warning = (f"With {drafts} draft tokens per round the KV cache needs more memory, so the context "
+                    causes = ([f"{drafts} draft tokens per round"] if more_drafts else []) + (["vision"] if vision else [])
+                    warning = (f"With {' and '.join(causes)} the model needs more memory, so the context "
                                f"is {_dots(fitted[0])} instead of {_dots(preset['context'])} tokens. "
-                               f"Set draft_tokens to {DEFAULT_DRAFT_TOKENS} for the largest context.")
+                               + (f"Set draft_tokens to {DEFAULT_DRAFT_TOKENS} for the largest context."
+                                  if not vision else "Switch them off in the settings for the largest context."))
                 elif reduced:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM is free. For {_dots(preset['context'])} "
                                f"tokens the model needs about {_gib(need)} GiB, so the context is reduced to "
@@ -541,7 +566,9 @@ class Supervisor:
                                   "Otherwise Windows pages out GPU memory and the speed drops to a quarter. ")
                                + "For the full context, close other GPU programs and start again."
                                + (f" {drafts} draft tokens per round also take part of the memory."
-                                  if more_drafts else ""))
+                                  if more_drafts else "")
+                               + (f" Vision takes {VISION_RESERVE_GIB} GiB of it; switch it off in the settings "
+                                  "for a larger context." if vision else ""))
                 if tight:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM was free at the start, and the model takes "
                                f"about {_gib(need)} GiB. "
@@ -687,7 +714,8 @@ class Supervisor:
         preset = self.effective_preset()
         result = clients.register_all(self.config.api_base_url, preset["context"], preset["max_seqs"],
                                       dry_run=not write, variant=preset.get("variant", ""),
-                                      api_key=self.config.api_key, key_file=data_dir() / KEY_FILE)
+                                      api_key=self.config.api_key, key_file=data_dir() / KEY_FILE,
+                                      vision=self.config.vision)
         for entry in result.values():
             if entry.get("changed"):
                 self.log.add(f"--- {entry['client']}: model {entry['model']} {entry['detail']} ({entry['path']})", "step")

@@ -109,7 +109,7 @@ def key_reference(key_file: Path | None) -> str:
 
 
 def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
-                   api_key: str = "", key_file: Path | None = None) -> dict:
+                   api_key: str = "", key_file: Path | None = None, vision: bool = False) -> dict:
     """Same entry shape as register-qwen-opencode.py, so both starters agree."""
     updated = copy.deepcopy(config)
     provider = _child(_child(updated, "provider"), PROVIDER_ID)
@@ -124,6 +124,11 @@ def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, var
     entry = _child(_child(provider, "models"), MODEL_ID)
     entry["name"] = model_name(context, max_seqs, variant)
     entry["reasoning"] = True
+    # Images: OpenCode only offers attachments for a model that says it takes them.
+    if vision or "attachment" in entry:
+        entry["attachment"] = vision
+    if vision or "modalities" in entry:
+        entry["modalities"] = {"input": ["text", "image"] if vision else ["text"], "output": ["text"]}
     _child(entry, "options").setdefault("reasoningEffort", "medium")
     variants = _child(entry, "variants")
     for level in REASONING_LEVELS:
@@ -139,7 +144,7 @@ def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, var
 
 
 def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
-             api_key: str = "", key_file: Path | None = None) -> dict:
+             api_key: str = "", key_file: Path | None = None, vision: bool = False) -> dict:
     updated = copy.deepcopy(config)
     updated.setdefault("$schema", "https://pi.dev/schemas/models.schema.json")
     provider = _child(_child(updated, "providers"), PROVIDER_ID)
@@ -172,7 +177,7 @@ def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: 
     # Pi levels -> reasoning_effort. null marks a level this checkpoint cannot do; Pi then clamps.
     entry["thinkingLevelMap"] = {"off": None, "minimal": None, "low": "low", "medium": "medium",
                                  "high": None, "xhigh": "xhigh", "max": None}
-    entry["input"] = ["text"]
+    entry["input"] = ["text", "image"] if vision else ["text"]
     entry["cost"] = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
     entry["contextWindow"] = context
     entry["maxTokens"] = OUTPUT_LIMIT
@@ -181,13 +186,13 @@ def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: 
 
 def _register(name: str, path: Path, apply, base_url: str, context: int, max_seqs: int,
               dry_run: bool, must_exist: bool, guard_credentials: bool, variant: str = "",
-              api_key: str = "", key_file: Path | None = None) -> dict:
+              api_key: str = "", key_file: Path | None = None, vision: bool = False) -> dict:
     status = {"client": name, "path": str(path), "model": f"{PROVIDER_ID}/{MODEL_ID}"}
     try:
         if must_exist and not path.parent.is_dir():
             return {**status, "status": "missing", "detail": f"{name} is not set up here"}
         original, text = _load(path)
-        updated = apply(original, base_url, context, max_seqs, variant, api_key, key_file)
+        updated = apply(original, base_url, context, max_seqs, variant, api_key, key_file, vision)
         if updated == original:
             return {**status, "status": "ok", "detail": "registered"}
         if dry_run:
@@ -217,7 +222,7 @@ def write_key_file(key_file: Path, api_key: str) -> None:
 
 def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = False,
                  opencode_file: Path | None = None, pi_file: Path | None = None, variant: str = "",
-                 api_key: str = "", key_file: Path | None = None) -> dict:
+                 api_key: str = "", key_file: Path | None = None, vision: bool = False) -> dict:
     if key_file and not dry_run:
         try:
             write_key_file(key_file, api_key)
@@ -226,9 +231,9 @@ def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = Fal
     return {
         "opencode": _register("OpenCode", opencode_file or opencode_path(), apply_opencode,
                               base_url, context, max_seqs, dry_run, must_exist=False, guard_credentials=True,
-                              variant=variant, api_key=api_key, key_file=key_file),
+                              variant=variant, api_key=api_key, key_file=key_file, vision=vision),
         # Pi's models.json legitimately holds "apiKey" entries (dummy keys, "!command"), so no credential guard.
         "pi": _register("Pi", pi_file or pi_path(), apply_pi,
                         base_url, context, max_seqs, dry_run, must_exist=True, guard_credentials=False,
-                        variant=variant, api_key=api_key, key_file=key_file),
+                        variant=variant, api_key=api_key, key_file=key_file, vision=vision),
     }

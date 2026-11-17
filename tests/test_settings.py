@@ -348,6 +348,79 @@ class ApiKeyTests(TempData):
         self.assertFalse(key_file.exists())
 
 
+class VisionTests(TempData):
+    """Vision is optional: the image encoder costs VRAM, so it is only loaded when asked for."""
+
+    def command(self, launcher):
+        return launcher.command(PRESETS["262k"])
+
+    def test_the_server_only_gets_the_image_arguments_and_its_own_cache_when_vision_is_on(self):
+        off = " ".join(self.command(ManagedLauncher(Config(mode="managed"))))
+        self.assertNotIn("limit-mm-per-prompt", off)
+        self.assertNotIn("VLLM_CACHE_ROOT", off)
+        on = self.command(ManagedLauncher(Config(mode="managed", vision=True, extra_args="--seed 7")))
+        self.assertIn("EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health "
+                      "--limit-mm-per-prompt.image 4 --limit-mm-per-prompt.video 0 --seed 7", on)
+        # A graph that vLLM compiled without images does not fit a server with images: separate caches.
+        self.assertIn("VLLM_CACHE_ROOT=/opt/qwen-station/cache/vllm-vision", on)
+        self.assertIn("VLLM_CACHE_ROOT=/data/engine/cache/vllm-vision",
+                      self.command(NativeLauncher(Config(mode="native", prefix="/data/engine", vision=True))))
+        self.assertFalse([part for part in on if '"' in part])  # nothing that needs quoting on the way into WSL
+
+    def test_vision_takes_its_share_of_the_vram_from_the_context(self):
+        free = 30.8 * 1024  # a card with little else on it
+        self.assertEqual(supervisor_module.fit_context(free, 262144)[0], 262144)
+        with_vision = supervisor_module.FIT_RESERVE_GIB + supervisor_module.VISION_RESERVE_GIB
+        self.assertEqual(supervisor_module.fit_context(free, 262144, with_vision)[0], 196608)
+
+    def test_the_start_fits_the_context_for_vision_even_when_the_plain_model_would_fit(self):
+        config = Config(mode="managed", vision=True, register_clients=False)
+        supervisor = Supervisor(config, MockLauncher(config))
+        row = {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": 30.8 * 1024, "mem_used": 1000}
+        config.mock = False  # the preflight only looks at the card for a real server
+        with mock.patch.object(supervisor_module.gpu, "query_once", return_value=[row]), \
+                mock.patch.object(supervisor_module.gpu, "pick", return_value=row), \
+                mock.patch.object(supervisor_module.gpu, "compute_processes", return_value=[], create=True):
+            checks = supervisor.run_preflight("free")
+        vram = next(check for check in checks if check["id"] == "vram")
+        self.assertTrue(vram["ok"])
+        self.assertEqual(supervisor.effective_preset()["context"], 196608)
+        self.assertIn("Vision takes 1.7 GiB", supervisor.warning)
+
+    def test_the_clients_learn_that_the_model_takes_images_and_forget_it_again(self):
+        opencode, pi = self.home / "opencode.json", self.home / "pi" / "models.json"
+        pi.parent.mkdir()
+        paths = {"opencode_file": opencode, "pi_file": pi}
+
+        def entries():
+            return (json.loads(opencode.read_text(encoding="utf-8"))["provider"]["vllm"]["models"]["qwen38-gittensor-dflash"],
+                    json.loads(pi.read_text(encoding="utf-8"))["providers"]["vllm"]["models"][0])
+
+        clients.register_all("http://127.0.0.1:8000/v1", 262144, 1, **paths)
+        plain, _ = entries()
+        self.assertNotIn("attachment", plain)  # nothing new in the config of someone who never uses vision
+        clients.register_all("http://127.0.0.1:8000/v1", 262144, 1, vision=True, **paths)
+        first, second = entries()
+        self.assertTrue(first["attachment"])
+        self.assertEqual(first["modalities"], {"input": ["text", "image"], "output": ["text"]})
+        self.assertEqual(second["input"], ["text", "image"])
+        clients.register_all("http://127.0.0.1:8000/v1", 262144, 1, vision=False, **paths)
+        first, second = entries()
+        self.assertFalse(first["attachment"])
+        self.assertEqual((first["modalities"]["input"], second["input"]), (["text"], ["text"]))
+
+    def test_vision_waits_for_the_restart_like_the_other_model_settings(self):
+        station = self.station()
+        station.supervisor.state = "ready"
+        self.assertEqual(station.save_settings({"vision": True})["pending"], ["vision"])
+        self.assertFalse(station.state_json()["model"]["vision"])
+        station.supervisor.before_start()
+        state = station.state_json()["model"]
+        self.assertTrue(state["vision"])
+        self.assertTrue(state["subtitle"].endswith(", vision"))
+        self.assertEqual(settings.validate(station.config, settings.values(station.config), {"vision": "yes"}, [])[2], "vision")
+
+
 class RelayTests(unittest.TestCase):
     """The relay passes connections from other devices on to the server behind 127.0.0.1."""
 

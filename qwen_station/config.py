@@ -32,6 +32,9 @@ DEFAULT_DRAFT_TOKENS = 7
 # With vision on, a request may carry this many images. The start script switches images off by default,
 # and vLLM then does not load the image encoder at all.
 VISION_IMAGES = 4
+# Requests the server works on at the same time. They share one KV pool: a slot reserves nothing, a running
+# request takes its own state (about 1.5 GiB) plus its text. Tested with up to 4.
+MAX_SLOTS = 4
 LOCAL_HOST = "127.0.0.1"  # the API answers this machine only
 ANY_HOST = "0.0.0.0"      # the API listens on every network interface
 API_KEY_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{8,128}")  # what fits into an Authorization header as it is
@@ -41,25 +44,16 @@ MAX_DRAFT_TOKENS = 15
 # "context" includes the generated output.
 PRESETS = {
     "262k": {
-        "label": "262K, 1 slot",
+        "label": "262K",
         "context": 262144,
         "kv_bytes": 10350000000,
-        "max_seqs": 1,
-        "note": "Default, signed off on 2026-09-19",
+        "note": "Default: the largest context, if the card is free enough for it",
     },
     "237k": {
-        "label": "237K, 1 slot",
+        "label": "237K",
         "context": 237312,
         "kv_bytes": 9500000000,
-        "max_seqs": 1,
         "note": "About 0.8 GB more VRAM headroom",
-    },
-    "parallel-96k": {
-        "label": "96K, 2 slots",
-        "context": 98304,
-        "kv_bytes": 10350000000,
-        "max_seqs": 2,
-        "note": "Experimental, not signed off on the GPU",
     },
     # Unsloth's dynamic NVFP4 quant of the same model, with the same DFlash2 drafter. Its weights take 4.3 GiB
     # more, so the context is smaller. Measured 2026-11-16 on vLLM 0.32.0: 242 to 274 tok/s short, 245 to 254 at 33K.
@@ -67,10 +61,9 @@ PRESETS = {
         "label": "Unsloth NVFP4, 82K",
         "context": 81920,
         "kv_bytes": 4390000000,
-        "max_seqs": 1,
         "note": "Unsloth Dynamic NVFP4 with DFlash2: 4.3 GiB larger, so less context, about 15% slower",
         "env": {"TARGET_NAME": "Qwen3.8-27B-NVFP4-Unsloth", "TARGET_QUANT": "compressed-tensors"},
-        "fit_reserve_gib": 24.9,
+        "fit_reserve_gib": 25.9,
         "variant": "Unsloth NVFP4",
     },
 }
@@ -102,6 +95,7 @@ class Config:
     fit_context: bool = True  # shrink the context when too little VRAM is free, instead of paging
     draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
     vision: bool = False  # load the image encoder: requests may contain images, at the cost of some VRAM
+    slots: int = 1  # requests the server works on at the same time; they share the context
     extra_args: str = ""  # appended to the `vllm serve` command line, for experiments
     vllm_prefix: str = ""  # venv to run, e.g. /opt/vllm-0.32.0; empty: the start script's default
     model_base: str = ""  # WSL folder holding target and drafter; empty: the Windows folder via /mnt
@@ -144,6 +138,8 @@ class Config:
             raise ValueError("mode must be 'managed', 'native' or 'legacy'")
         if isinstance(self.draft_tokens, bool) or not 1 <= self.draft_tokens <= MAX_DRAFT_TOKENS:
             raise ValueError(f"draft_tokens must be a number from 1 to {MAX_DRAFT_TOKENS}")
+        if isinstance(self.slots, bool) or not 1 <= self.slots <= MAX_SLOTS:
+            raise ValueError(f"slots must be a number from 1 to {MAX_SLOTS}")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
         if self.api_host:
@@ -226,6 +222,7 @@ _FILE_KEYS = {
     "fit_context": bool,
     "draft_tokens": int,
     "vision": bool,
+    "slots": int,
     "extra_args": str,
     "vllm_prefix": str,
     "model_base": str,
@@ -285,6 +282,10 @@ def load_config(explicit_path: str | None = None, overrides: dict | None = None)
     for key, value in (overrides or {}).items():
         if value is not None:
             setattr(config, key, value)
+    if config.preset == "parallel-96k":
+        # Up to 1.5.0 two slots were a preset of their own, with half the context each. Now slots are a setting.
+        config.preset = "262k"
+        config.slots = max(config.slots, 2)
     root_given = root_from_file or bool((overrides or {}).get("root"))
     if "mode" not in file_values and not (overrides or {}).get("mode"):
         # A folder with the start scripts means the hand-built setup; everything else is the release.

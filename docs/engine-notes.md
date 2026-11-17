@@ -12,7 +12,7 @@ unless stated otherwise.
 | Drafter | `TechPrototyper/Qwen3.8-27B-DFlash2-fp8-vllm`: DFlash2, FP8, block size 8, so up to 7 speculative tokens |
 | KV cache | FP8, fixed pool, layers in groups of eight |
 | Decode kernel | XQA (TRT-LLM attention) |
-| Context | up to 262,144 tokens, one slot |
+| Context | what the free VRAM holds: up to 229,376 tokens on Windows, 262,144 on Linux; one slot by default, up to four that share it |
 
 Typical acceptance length of the drafter is 4.5 to 5 tokens per round.
 
@@ -22,10 +22,41 @@ Typical acceptance length of the drafter is 4.5 to 5 tokens per round.
 automatic pool vLLM takes all the memory it sees, Windows starts paging GPU memory, and the speed drops to a
 quarter (54 against 243 tok/s). The symptom is a GPU at 99 % utilization that draws only about 240 W.
 
-**The context follows the free VRAM.** A pool of P GiB holds (P − 1.546) × 32,730 tokens. The server needs
-21.0 GiB beside its pool. Qwen Station computes the largest context that fits, in steps of 32,768 tokens, and
-refuses to start below 65,536. Without this, half a GiB too little is enough to trigger the paging above
-(prefill 1,825 instead of 8,800 tok/s).
+**The context follows the free VRAM.** A request of L tokens needs 1.62 GiB + L / 32,400 GiB in the KV pool;
+the pool gets 2 percent on top. Qwen Station keeps 22.0 GiB beside the pool (21.5 on Linux), computes the
+largest context that fits, in steps of 32,768 tokens, and refuses to start below 65,536.
+
+The pool figures were 1.546 GiB and 32,730 tokens per GiB up to version 1.5.0, taken from the size vLLM
+reports for its cache. That left the pool 2 percent too small for one request of the whole context. Measured
+2026-11-17 with single cold requests in a pool of 6.617 GiB (context 163,840): 128,900 tokens filled 84 percent
+of the pool, 143,900 tokens 92, 150,908 tokens 94, 156,884 tokens 97. A prompt of 163,000 tokens reached 99
+percent, lost its blocks and started over, without end and without an error; vLLM does not count that as a
+preemption. With the new figures and 1 percent on top, a prompt of 163,388 tokens (99.7 percent of the
+context) was answered after 47 seconds with the pool at 99 percent, and a longer one got HTTP 400 at once. The
+2 percent are for the blocks of 1,648 tokens the cache is handed out in.
+
+The 22.0 GiB were 21.0 up to version 1.5.0, and the full context started without any fit whenever 0.92 of the
+card (29.3 GiB) was free. Measured 2026-11-17, that was too little. Weights and runtime take 20.3 GiB at the
+start and 20.8 to 21.3 GiB after one or two long sessions. Windows pages before the card is full: `nvidia-smi`
+stayed at 31.9 of 32.6 GiB in every run that paged. And the paging hides: vLLM allocates the whole pool at the
+start, Windows moves the untouched part out, and short prompts stay fast. With 30.1 GiB free and the full
+context, a session of 163K tokens decoded at 83 tok/s; with 229,376 tokens of context (30.6 GiB free) the same
+session ran at 380 to 400 tok/s, also after two long sessions, with `nvidia-smi` at 31.5 to 31.9 GiB. So the
+full context needs 31.9 GiB free, more than a 32 GB card has under Windows: there the largest context is
+229,376 tokens. On Linux nothing pages, so 0.5 GiB less is kept and the full context fits a free card; that
+figure is not measured on a Linux machine.
+
+**Slots share the KV pool, and a slot costs nothing.** `--max-num-seqs` only limits how many requests run at
+once. vLLM reports its pool as "tokens" and "maximum concurrency", and both follow from one rule: a running
+request needs a fixed part plus its tokens. With a pool of 9.64 GiB it reported 264,910 tokens and 1.01x for
+requests of 262,144 tokens, 180,577 tokens and 2.76x for 65,536, and 45,471 tokens and 5.55x for 8,192, the
+same with 3 and with 4 slots. That fits a fixed part of 1.48 GiB per running request (the Mamba states and the
+snapshots for the draft tokens) and 32,500 tokens per GiB. So Qwen Station sizes the pool for one request of
+the full context, as before, and several requests share it: each one that runs takes the room of about 52,000
+tokens for its fixed part (1.62 GiB as the pool counts it). Requests that do not fit together wait; vLLM counted no preemption in any test.
+Two requests at once ran at 332 to 347 tok/s each (653 to 680 together), four at 344 to 449 each (1,365 to
+1,376 together). The verified kernel tuning applies with every number of slots (96 configs loaded, nothing
+measured again). The earlier preset with two slots and half the context each is gone.
 
 **XQA decode kernel from vLLM 0.32 on.** With FlashInfer 0.7, XQA is faster at every context size: 214 to 289
 tok/s at 129K context against about 150 with the native kernel. On vLLM 0.29 (FlashInfer 0.6) it was the other

@@ -178,14 +178,14 @@ class StationTests(unittest.TestCase):
 class LauncherTests(unittest.TestCase):
     def test_wsl_command_matches_the_existing_starter(self):
         launcher = WslLauncher(Config(root=r"D:\qwen-engine"))
-        command = launcher.command({"context": 262144, "kv_bytes": 10350000000, "max_seqs": 1})
+        command = launcher.command({"context": 262144, "kv_bytes": 10350000000})
         self.assertEqual(command, ["wsl.exe", "-d", "Ubuntu", "--exec", "env", "VLLM_HOST=127.0.0.1",
                                    "VLLM_PORT=8000", "CTX=262144", "KV_BYTES=10350000000", "MAX_SEQS=1",
                                    "EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health", "bash",
                                    "/mnt/d/qwen-engine/run-variant-logged.sh", "dflash"])
         lan = WslLauncher(Config(root=r"D:\qwen-engine", lan=True, gpu_memory_utilization=0.9,
                                  extra_args="--max-model-len 188416", vllm_prefix="/opt/vllm-0.32.0"))
-        lan_command = lan.command({"context": 98304, "kv_bytes": 10350000000, "max_seqs": 2})
+        lan_command = lan.command({"context": 98304, "kv_bytes": 10350000000})
         self.assertIn("VLLM_HOST=127.0.0.1", lan_command)  # in WSL always; other devices come in through the relay
         self.assertIn("GPU_UTIL=0.9", lan_command)
         self.assertIn("EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health --max-model-len 188416", lan_command)
@@ -217,16 +217,25 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(supervisor.snapshot()["warning"].count("XQA decode kernel"), 1)
 
     def test_context_is_fitted_to_the_free_vram(self):
-        from qwen_station.supervisor import fit_context
+        from qwen_station.supervisor import fit_context, kv_pool_bytes
         self.assertEqual(fit_context(40000, 262144)[0], 262144)  # never more than the preset
-        context, kv_bytes = fit_context(28.8 * 1024, 262144)  # the case measured on 2026-11-16
-        self.assertEqual(context, 196608)
-        self.assertAlmostEqual(kv_bytes / 2 ** 30, 7.63, places=1)
-        self.assertEqual(fit_context(27.32 * 1024, 262144)[0], 131072)
+        # Measured 2026-11-17: with 30.08 GiB free the full context ran the card full and a long session paged;
+        # with 30.6 GiB free 229,376 tokens stayed fast, also after two long sessions.
+        self.assertEqual(fit_context(30.08 * 1024, 262144)[0], 196608)
+        context, kv_bytes = fit_context(30.9 * 1024, 262144)
+        self.assertEqual(context, 229376)
+        self.assertAlmostEqual(kv_bytes / 2 ** 30, 8.87, places=2)
+        # The whole context needs 31.9 GiB free: more than a 32 GB card has under Windows.
+        self.assertEqual(fit_context(31.84 * 1024, 262144)[0], 229376)
+        self.assertEqual(fit_context(31.95 * 1024, 262144)[0], 262144)
+        # Measured 2026-11-17: 156,884 tokens filled 97 percent of a 6.617 GiB pool, and a prompt of 99.5
+        # percent of the context never finished. The pool for a context must hold a request of that size.
+        self.assertGreater(kv_pool_bytes(163840) / 2 ** 30, (1.59 + 163840 / 32500) * 1.01)
+        self.assertEqual(fit_context(28.85 * 1024, 262144)[0], 163840)
         self.assertIsNone(fit_context(8000, 262144))  # another model holds the card: do not start at all
-        self.assertEqual(fit_context(28.8 * 1024, 81920, 24.9)[0], 65536)  # the larger Unsloth target
+        self.assertEqual(fit_context(29.8 * 1024, 81920, 25.9)[0], 65536)  # the larger Unsloth target
         # 163,840 tokens needed 6.51 GiB in the real server; the computed pool must cover that
-        self.assertGreater(fit_context(27.6 * 1024, 163840)[1], 6.51 * 2 ** 30)
+        self.assertGreater(fit_context(28.85 * 1024, 163840)[1], 6.51 * 2 ** 30)
         config = Config(mock=True)
         supervisor = Supervisor(config, MockLauncher(config))
         self.assertEqual(supervisor.effective_preset()["context"], 262144)
@@ -240,17 +249,19 @@ class LauncherTests(unittest.TestCase):
         # Measured 2026-11-17 for 163,840 tokens: the server needed 7.15 GiB with 11 and 7.84 GiB with 15 draft tokens.
         self.assertGreater(kv_pool_bytes(163840, 11), 7.15 * 2 ** 30)
         self.assertGreater(kv_pool_bytes(163840, 15), 7.84 * 2 ** 30)
-        self.assertLess(kv_pool_bytes(163840, 15), 8.1 * 2 ** 30)
-        self.assertEqual(kv_pool_bytes(163840, 7), fit_context(27.6 * 1024, 163840)[1])
+        self.assertLess(kv_pool_bytes(163840, 15), 8.3 * 2 ** 30)
+        self.assertEqual(kv_pool_bytes(163840, 7), fit_context(28.85 * 1024, 163840)[1])
         self.assertEqual(kv_pool_bytes(163840, 3), kv_pool_bytes(163840, 7))  # fewer never shrinks the pool
-        free = 31.2 * 1024
+        free = 32.0 * 1024
         self.assertEqual(fit_context(free, 262144)[0], 262144)
         self.assertEqual(fit_context(free, 262144, draft_tokens=11)[0], 229376)
-        self.assertEqual(fit_context(free, 262144, draft_tokens=15)[0], 229376)
-        self.assertEqual(fit_context(29.0 * 1024, 262144, draft_tokens=15)[0], 163840)
+        self.assertEqual(fit_context(free, 262144, draft_tokens=15)[0], 196608)
+        self.assertEqual(fit_context(30.25 * 1024, 262144, draft_tokens=15)[0], 163840)
         launcher = WslLauncher(Config(root=r"D:\qwen-engine", draft_tokens=11))
         self.assertIn("SPEC_TOKENS=11", launcher.command(PRESETS["262k"]))
-        self.assertNotIn("SPEC_TOKENS=11", launcher.command(PRESETS["parallel-96k"]))  # single slot only
+        # More slots do not change that: every running request has its own draft states in the shared pool.
+        self.assertIn("SPEC_TOKENS=11", WslLauncher(Config(root=r"D:\qwen-engine", draft_tokens=11, slots=3))
+                      .command(PRESETS["262k"]))
         self.assertFalse([part for part in WslLauncher(Config(root=r"D:\qwen-engine")).command(PRESETS["262k"])
                           if part.startswith("SPEC_TOKENS")])
         with self.assertRaises(ValueError):

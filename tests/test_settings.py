@@ -368,7 +368,7 @@ class VisionTests(TempData):
         self.assertFalse([part for part in on if '"' in part])  # nothing that needs quoting on the way into WSL
 
     def test_vision_takes_its_share_of_the_vram_from_the_context(self):
-        free = 30.8 * 1024  # a card with little else on it
+        free = 32.0 * 1024  # more than a 32 GB card has free: the numbers only show the difference
         self.assertEqual(supervisor_module.fit_context(free, 262144)[0], 262144)
         with_vision = supervisor_module.FIT_RESERVE_GIB + supervisor_module.VISION_RESERVE_GIB
         self.assertEqual(supervisor_module.fit_context(free, 262144, with_vision)[0], 196608)
@@ -376,11 +376,11 @@ class VisionTests(TempData):
     def test_the_start_fits_the_context_for_vision_even_when_the_plain_model_would_fit(self):
         config = Config(mode="managed", vision=True, register_clients=False)
         supervisor = Supervisor(config, MockLauncher(config))
-        row = {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": 30.8 * 1024, "mem_used": 1000}
+        row = {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": 32.0 * 1024, "mem_used": 0}
         config.mock = False  # the preflight only looks at the card for a real server
         with mock.patch.object(supervisor_module.gpu, "query_once", return_value=[row]), \
                 mock.patch.object(supervisor_module.gpu, "pick", return_value=row), \
-                mock.patch.object(supervisor_module.gpu, "compute_processes", return_value=[], create=True):
+                mock.patch.object(supervisor_module.gpu, "gpu_processes", return_value=[]):
             checks = supervisor.run_preflight("free")
         vram = next(check for check in checks if check["id"] == "vram")
         self.assertTrue(vram["ok"])
@@ -419,6 +419,110 @@ class VisionTests(TempData):
         self.assertTrue(state["vision"])
         self.assertTrue(state["subtitle"].endswith(", vision"))
         self.assertEqual(settings.validate(station.config, settings.values(station.config), {"vision": "yes"}, [])[2], "vision")
+
+
+class SlotTests(TempData):
+    """Slots: how many requests the server works on at once. They share the context."""
+
+    def row(self, free_gib):
+        return {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": free_gib * 1024, "mem_used": 0}
+
+    def preflight(self, free_gib, **overrides):
+        config = Config(**{"mode": "managed", "register_clients": False, **overrides})
+        supervisor = Supervisor(config, MockLauncher(config))
+        config.mock = False  # the preflight only looks at the card for a real server
+        row = self.row(free_gib)
+        with mock.patch.object(supervisor_module.gpu, "query_once", return_value=[row]), \
+                mock.patch.object(supervisor_module.gpu, "pick", return_value=row), \
+                mock.patch.object(supervisor_module.gpu, "gpu_processes", return_value=[]):
+            checks = supervisor.run_preflight("free")
+        return supervisor, next(check for check in checks if check["id"] == "vram")
+
+    def test_the_server_gets_the_number_of_slots_and_nothing_else_changes(self):
+        def parts(config):
+            return ManagedLauncher(config).command(PRESETS["262k"])
+
+        one, three = parts(Config(mode="managed")), parts(Config(mode="managed", slots=3))
+        self.assertIn("MAX_SEQS=1", one)
+        self.assertIn("MAX_SEQS=3", three)
+        # A slot reserves nothing in the KV pool, so the context and the pool stay as they are.
+        self.assertEqual([part for part in one if not part.startswith("MAX_SEQS")],
+                         [part for part in three if not part.startswith("MAX_SEQS")])
+
+    def test_slots_do_not_shrink_the_context(self):
+        for slots in (1, 4):
+            supervisor, vram = self.preflight(32.0, slots=slots)
+            self.assertTrue(vram["ok"])
+            self.assertEqual(supervisor.effective_preset()["context"], 262144)
+            self.assertEqual(supervisor.warning, "")
+
+    def test_the_full_context_needs_a_card_that_is_really_free(self):
+        # Up to 1.5.0 anything above 29.3 GiB free started the full context, and long sessions then paged.
+        supervisor, vram = self.preflight(30.08)
+        self.assertEqual(supervisor.effective_preset()["context"], 196608)
+        self.assertTrue(vram["ok"] and vram["warn"])
+        self.assertIn("30.1 GiB of VRAM is free", supervisor.warning)
+        self.assertIn("another graphics card", supervisor.warning)
+        self.assertEqual(self.preflight(30.9)[0].effective_preset()["context"], 229376)
+
+    def test_linux_can_use_the_card_to_its_end(self):
+        # Windows pages before the card is full, Linux does not: the same free memory gives more context there.
+        self.assertEqual(self.preflight(31.5)[0].effective_preset()["context"], 229376)
+        self.assertEqual(self.preflight(31.5, mode="native", prefix="/p")[0].effective_preset()["context"], 262144)
+
+    def test_the_pool_follows_the_context_and_the_draft_tokens_not_the_preset(self):
+        plain = Supervisor(Config(), MockLauncher(Config())).effective_preset()
+        self.assertEqual(plain["kv_bytes"], supervisor_module.kv_pool_bytes(262144))
+        more = Config(draft_tokens=11)
+        self.assertEqual(Supervisor(more, MockLauncher(more)).effective_preset()["kv_bytes"],
+                         supervisor_module.kv_pool_bytes(262144, 11))
+
+    def test_without_the_fit_the_preset_starts_as_it_is(self):
+        supervisor, vram = self.preflight(30.08, fit_context=False)
+        self.assertEqual(supervisor.effective_preset()["context"], 262144)
+        self.assertTrue(vram["warn"])  # it starts, with a warning about what can happen
+
+    def test_ready_waits_until_the_server_can_be_reached(self):
+        config = Config(mode="managed")
+        supervisor = Supervisor(config, MockLauncher(config))
+        supervisor.state, supervisor.started_at = "starting", 1.0
+        answers = iter([OSError("refused"), OSError("refused"), (200, b"")])
+
+        def health(url, timeout=2.0, key=""):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with mock.patch.object(supervisor_module, "http_get", side_effect=health) as get, \
+                mock.patch.object(supervisor_module.time, "sleep"):
+            supervisor._ready_when_reachable()
+        self.assertEqual((get.call_count, supervisor.state), (3, "ready"))
+        self.assertEqual(get.call_args.args[0], "http://127.0.0.1:8000/health")
+
+    def test_the_number_of_slots_has_limits_and_waits_for_the_restart(self):
+        config = Config()
+        for slots in (0, 5, True):
+            self.assertEqual(settings.validate(config, settings.values(config), {"slots": slots}, [])[2], "slots")
+        with self.assertRaises(ValueError):
+            Config(slots=5).validate()
+        station = self.station()
+        station.supervisor.state = "ready"
+        self.assertEqual(station.save_settings({"slots": 3})["pending"], ["slots"])
+        self.assertEqual(station.state_json()["model"]["max_seqs"], 1)
+        station.supervisor.before_start()
+        self.assertEqual(station.state_json()["model"]["max_seqs"], 3)
+
+    def test_the_old_two_slot_preset_becomes_the_setting(self):
+        path = self.home / "old.json"
+        path.write_text(json.dumps({"preset": "parallel-96k"}), encoding="utf-8")
+        loaded = load_config(str(path))
+        self.assertEqual((loaded.preset, loaded.slots), ("262k", 2))
+        self.assertNotIn("parallel-96k", PRESETS)
+
+    def test_the_clients_see_the_slots_in_the_name_of_the_model(self):
+        self.assertTrue(clients.model_name(229376, 1).endswith("229K (RTX 5090)"))
+        self.assertTrue(clients.model_name(229376, 4).endswith("229K (RTX 5090) - 4 slots"))
 
 
 class RelayTests(unittest.TestCase):

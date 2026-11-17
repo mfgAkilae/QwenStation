@@ -30,9 +30,8 @@ _CREDENTIAL_KEY = re.compile(
 
 def model_name(context: int, max_seqs: int, variant: str = "") -> str:
     model = f"Qwen3.8 27B {variant}".strip()
-    if max_seqs == 2:
-        return f"{model} - FP8 KV - DFlash2 - {context // 1024}K (RTX 5090) - 2 Slots (experimental)"
-    return f"{model} - FP8 KV - DFlash2 - {context // 1000}K (RTX 5090)"
+    slots = f" - {max_seqs} slots" if max_seqs > 1 else ""
+    return f"{model} - FP8 KV - DFlash2 - {context // 1000}K (RTX 5090){slots}"
 
 
 def opencode_path() -> Path:

@@ -12,7 +12,10 @@ what the model is doing. For Windows and for Linux.
   generate an API key.
 - **Speed on the test machine:** it depends on what the model writes. Short prompts: about 160 tok/s for
   prose, 330 for code, 450 for step-by-step reasoning. Behind 137K tokens of context: 190, 240 and 320.
-  Up to 262,144 tokens of context. [Details and how to measure it yourself](#speed).
+  [Details and how to measure it yourself](#speed).
+- **Context:** as much as the free VRAM holds without paging, up to 229,376 tokens on Windows and the model's
+  262,144 on Linux; 163,840 to 196,608 when a desktop runs on the same card. See
+  [Free VRAM decides the context size](#free-vram-decides-the-context-size).
 - **Verified runs on LocalMaxxing**
   ([listed here](https://www.localmaxxing.com/en/models/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090)):
   381.5 tok/s on `reasoning-v1` and 293 tok/s on `code-v1` with the default setting; 439.9 and 290.5 tok/s
@@ -137,17 +140,34 @@ the app, which hands the bytes on unchanged (see [Settings](#settings)).
 
 ### Free VRAM decides the context size
 
-The card has 31.8 GiB; with the full context of 262,144 tokens the model takes about 30 GiB.
+The card has 31.8 GiB. Beside its KV cache the model takes 20.3 GiB at the start and up to 21.3 GiB after long
+sessions, and Windows starts paging GPU memory about 0.65 GiB before the card is full. So Qwen Station keeps
+22 GiB for that and gives the rest to the context:
 
-| Free at start | Behavior |
+| Free at start | Context |
 |---|---|
-| 29.3 GiB or more | Full context |
-| less | The context shrinks in steps of 32,768 tokens until the model fits. The window says so, and OpenCode and Pi get the smaller limit. |
-| too little for 65,536 tokens | No automatic start. The window lists the programs that hold the most GPU memory. |
+| 31.9 GiB (Windows), 31.4 GiB (Linux) | 262,144 tokens, the model's full context |
+| 30.9 GiB | 229,376 |
+| 29.9 GiB | 196,608 |
+| 28.9 GiB | 163,840 |
+| each GiB less | 32,768 tokens less. The window says so, and OpenCode and Pi get the smaller limit. |
+| too little for 65,536 tokens (25.7 GiB) | No automatic start. The window lists the programs that hold the most GPU memory. |
 
-The reason: if the model does not fit, Windows pages GPU memory and the speed drops to a quarter (measured:
-prefill 1,825 instead of 8,800 tok/s); on Linux the server runs out of GPU memory. Close other GPU programs
-before starting to get the full context.
+On Windows the card never has 31.9 GiB free, so the largest context there is 229,376 tokens, with a card that
+runs nothing else: connect the displays to another graphics card or to the mainboard. A desktop with a browser
+on the same card takes 1 to 3 GiB, and 163,840 or 196,608 tokens are the usual result. On Linux, which does not
+page GPU memory, 0.5 GiB less is kept and the full context fits a card that is free.
+
+The reason for the reserve: if the model does not fit, Windows pages GPU memory. That does not show at once.
+Up to version 1.5.0 the full context started whenever 29.3 GiB were free; with 30.1 GiB free the card then ran
+full, short prompts were as fast as ever, and a session of 163K tokens decoded at 83 instead of 380 tok/s.
+On Linux the server runs out of GPU memory instead. "Fit the context to the free VRAM" in the settings switches
+the automatic off; the preset then starts as it is.
+
+The context is usable to its end. Up to version 1.5.0 the KV cache was 2 percent too small for that: a request
+of more than about 97 percent of the context never got an answer, because it ran out of cache blocks and
+started over, again and again. Now a prompt of 99.7 percent of the context is answered, and a longer one gets
+an error at once.
 
 ## Settings
 
@@ -163,6 +183,7 @@ The **Settings** button in the window opens them:
   request (`Authorization: Bearer <key>`, the API key field of an OpenAI-compatible client). Without a key,
   anyone who can reach the address can use the model, so set one before you share the API.
 - **Vision:** switches the model's image encoder on, see [Vision](#vision).
+- **Requests at the same time:** 1 to 4 slots, see [Several requests at once](#several-requests-at-once).
 - The API port, draft tokens per round, the automatic context reduction, the start of the model with the app,
   what happens when the window closes, the registration in OpenCode and Pi, the port of the dashboard, and
   extra arguments and environment for experiments.
@@ -205,9 +226,11 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 }
 ```
 
-- `preset`: `262k` (default), `237k` (about 0.8 GB more VRAM headroom), `parallel-96k` (two slots,
-  experimental) or `unsloth-82k` (Unsloth's NVFP4 build with the same drafter; needs
-  `provision.sh model-unsloth` first: inside the distribution on Windows, in the engine folder on Linux).
+- `preset`: `262k` (default), `237k` (about 0.8 GB more VRAM headroom) or `unsloth-82k` (Unsloth's NVFP4 build
+  with the same drafter; needs `provision.sh model-unsloth` first: inside the distribution on Windows, in the
+  engine folder on Linux). The earlier preset `parallel-96k` is now the setting `slots`.
+- `slots`: how many requests the server works on at the same time, 1 (default) to 4. See
+  [Several requests at once](#several-requests-at-once).
 - `close_action`: `stop` ends the model when the window closes, `keep` leaves it running until **Quit**.
 - `api_host`: `127.0.0.1` (default), `0.0.0.0` or one IPv4 address of this computer, as described above.
   The older switch `lan: true` still works and means `0.0.0.0`.
@@ -216,7 +239,7 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 - `fit_context`: `false` switches the automatic context reduction off.
 - `vision`: `true` loads the image encoder, so requests may contain images. See [Vision](#vision).
 - `draft_tokens`: how many tokens the drafter proposes per round, 7 by default, up to 15. More makes reasoning
-  17 to 30 percent faster and costs about 5,400 tokens of context each, see [Speed](#speed). Single-slot presets only.
+  17 to 30 percent faster and costs about 5,400 tokens of context each, see [Speed](#speed).
 - `extra_args`: appended to `vllm serve`. `extra_env`: `KEY=VALUE` pairs for the start script, for example
   `XQA_DECODE=0`.
 
@@ -249,12 +272,12 @@ The drafter was trained for blocks of 8 (7 draft tokens), but it keeps proposing
 `draft_tokens` raises the number. Each round then takes a little longer, and the KV cache needs a state per
 extra token, which costs context:
 
-| `draft_tokens` | Prose | Code | Reasoning | Rounds per second (short, 137K) | Largest context with all VRAM free |
+| `draft_tokens` | Prose | Code | Reasoning | Rounds per second (short, 137K) | Context with 31.5 GiB free (Windows) |
 |---|---|---|---|---|---|
-| 7 (default) | 160, 217, 192 | 331, 349, 238 | 451, 391, 323 | 65, 54 | 262,144 |
-| 9 | 147, 206, 190 | 318, 298, 295 | 509, 461, 332 | 62, 53 | about 251,000 |
-| 11 | 155, 188, 176 | 381, 280, 254 | 527, 443, 403 | 61, 47 | about 240,000 |
-| 15 | 153, 216, 165 | 374, 300, 278 | 554, 461, 419 | 60, 46 | about 219,000 |
+| 7 (default) | 160, 217, 192 | 331, 349, 238 | 451, 391, 323 | 65, 54 | 229,376 |
+| 9 | 147, 206, 190 | 318, 298, 295 | 509, 461, 332 | 62, 53 | 229,376 |
+| 11 | 155, 188, 176 | 381, 280, 254 | 527, 443, 403 | 61, 47 | 196,608 |
+| 15 | 153, 216, 165 | 374, 300, 278 | 554, 461, 419 | 60, 46 | 196,608 |
 
 The three numbers per cell are tok/s for a short prompt, behind 33K and behind 137K tokens. Reasoning gains 17 to
 30 percent with 11 or 15 draft tokens at every context size. Code gains with short prompts and varies behind long
@@ -280,7 +303,7 @@ What it costs:
 
 - **Context.** The encoder's weights take 0.86 GiB of VRAM and reading a large image up to 0.75 GiB more. Qwen
   Station reserves 1.7 GiB for vision, so the context gets one or two steps of 32,768 tokens smaller: with
-  30.8 GiB free, 196,608 instead of 262,144 tokens.
+  30.9 GiB free, 163,840 instead of 229,376 tokens.
 - **Speed of text: nothing.** With vision on and no image in the request, the speed is the same (short prompts:
   314 tok/s for code and 451 for reasoning, against 328 and 437 without vision; behind 33K tokens 365 against 372).
 - **Speed of answers about images:** about 200 tok/s after a small image, 110 to 130 after 16,000 image tokens.
@@ -291,6 +314,41 @@ What it costs:
 In a test the model named the colours and positions in a generated picture, kept two images apart in their
 order, and read the speed, the GPU and the VRAM figure off a screenshot of the dashboard. With vision on, the
 entries for OpenCode and Pi say that the model takes images.
+
+### Several requests at once
+
+By default the server works on one request at a time; a second one waits. The setting **Requests at the same
+time** (`slots`, `--slots`) raises that to up to 4.
+
+The slots share the context. A slot by itself costs nothing: the KV cache is one pool, and vLLM takes from it
+for every request that runs. Each running request needs about 1.6 GiB for its own state, which is the room of
+52,000 tokens, plus its text. With a pool for 229,376 tokens that means:
+
+| Running at the same time | Tokens they can hold together |
+|---|---|
+| 1 request | 229,376 (its limit) |
+| 2 requests | about 183,000 |
+| 3 requests | about 131,000 |
+| 4 requests | about 78,000 |
+
+A single request may still use the whole context. If requests do not fit together, nothing fails: the later
+one waits until there is room, and reads its context again if that was pushed out of the cache.
+
+Measured on 2026-11-17 (decode tok/s; short prompts unless stated):
+
+| Case | Per request | All together |
+|---|---|---|
+| 1 request | 350 to 490, depending on the text | |
+| 2 at once | 332 to 347 | 653 to 680 |
+| 4 at once | 344 to 449 | 1,365 to 1,376 |
+| A session of 163K tokens and a short request at once | 380 and 200 | |
+| The same two, one after the other (1 slot) | 390 and 480 | |
+| Sessions of 163K and 113K tokens at once, which do not fit together | 385 and 400 | the second one waited 30 to 53 s |
+
+Requests that run together move at the pace of the longest context among them, so a short request beside a
+long session gets about half its usual speed. Answers can differ in single words from the ones the same request
+gets alone (in the tests one to two of four did): batches are computed slightly differently, as in vLLM without
+a drafter. More draft tokens per round and vision work with several slots.
 
 ### Measure it yourself
 
@@ -351,7 +409,7 @@ served page, so other websites cannot control the app.
 ```powershell
 python run-station.py --mock            # fake server instead of the model: the dashboard without a GPU
 python run-station.py --check           # state of the installation as JSON
-python -m unittest discover -s tests    # 118 tests; they start the mock server as a real subprocess
+python -m unittest discover -s tests    # 128 tests; they start the mock server as a real subprocess
 .\build-exe.ps1 -Release                # dist\Qwen-Station-Setup-<version>.exe with its SHA256 file
 python3 build-linux.py                  # on Linux: dist/Qwen-Station-<version>-x86_64.AppImage with its SHA256 file
 ```
@@ -382,6 +440,15 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
 - **Windows**, with the release exe: uninstall, fresh setup into a new distribution, first start, benchmark,
   stop (1.0.0); updates to 1.1.0 and 1.2.0 without a click; 1.2.0 with `draft_tokens` 15, including the two
   LocalMaxxing runs.
+- **Slots (1.6.0)**, on Windows with the real model: 2, 3 and 4 slots with as many requests at once; a long
+  session beside a short request; two long sessions that do not fit together; the size of the KV pool as vLLM
+  reports it, for four context sizes. And the corrected VRAM reserve: the full context with 30.1 GiB free (it
+  paged with a long session), 229,376 tokens with 30.6 GiB free (it did not, also after two long sessions).
+  The end of the context: prompts of 79 to 99.7 percent of it, before the fix (the last one never finished)
+  and after (answered after 47 seconds), and one beyond the limit (HTTP 400). With the release exe: the
+  context chosen at 29.1 GiB free (163,840), a session of 152K tokens (405 tok/s), 4 slots through the
+  settings with four requests at once (1,385 to 1,405 tok/s together), and requests sent at the moment the
+  app reports "Ready".
 - **The settings of 1.4.0**, on Windows with the release exe: the API on all interfaces through the settings
   and a restart of the model, the administrator prompt (declined once, by its timeout, and confirmed once), the
   firewall rule, the removal of a port forwarding of an older setup, requests from this PC, over its LAN and VPN
@@ -407,4 +474,5 @@ Not tested on a real machine: Linux on bare metal with the native NVIDIA driver;
 manager and the window on a Linux desktop (only the terminal mode ran); distributions other than Ubuntu (the
 bundled Python is built for glibc 2.17 and newer, the package manager commands for Fedora, Arch and openSUSE are
 untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a faked WSL only);
-Windows 10; the preset `parallel-96k` on the GPU.
+Windows 10; more than 4 slots; slots in Linux mode with the real model; the full context of 262,144 tokens on
+a card with nothing else on it (the test machine's desktop runs on the same card).

@@ -31,17 +31,30 @@ LAN_STATE = "setup-qwen-lan.state.json"  # written by the script next to itself,
 # Shortfall the start tolerates. Measured 2026-11-16: 26.7 GiB free worked (Windows evicted other
 # programs' GPU memory), but the start took 9 minutes instead of 4.
 VRAM_TOLERANCE_MIB = 3072  # only used when fit_context is off
-# KV pool sizing for this model (FP8 KV, group size 8), measured 16.11.2026: a pool of P GiB holds
-# (P - 1.546) * 32730 tokens (9.64 GiB -> 264,910 tokens, 6.61 GiB -> 165,737 tokens).
-KV_FIXED_GIB = 1.546
-KV_TOKENS_PER_GIB = 32730
+# KV pool sizing for this model (FP8 KV, group size 8). A running request needs a fixed part (its Mamba states
+# and the snapshots for the draft tokens) plus its tokens. Measured 2026-11-17 with single cold requests in a
+# pool of 6.617 GiB: 128,900 tokens filled 84 percent of it, 143,900 tokens 92, 150,908 tokens 94 and 156,884
+# tokens 97, which is 1.59 GiB fixed and 32,500 tokens per GiB. The values before (1.546 and 32,730, taken from
+# the size vLLM reports) left the pool 2 percent too small for a request of the whole context: at 99.5 percent
+# of the context the request ran out of blocks, lost the ones it had, and started over, without end.
+KV_FIXED_GIB = 1.62
+KV_TOKENS_PER_GIB = 32400
+# On top of that: the cache is handed out in blocks of 1,648 tokens, and a request that needs one more block
+# than there is does not fail, it starts over. With 1 percent a prompt of 99.7 percent of the context filled
+# the pool to 99 percent; 2 percent leave room for a few blocks more.
+KV_MARGIN = 1.02
 # Every draft token beyond the default 7 adds a state snapshot per Mamba layer to the fixed part. Measured
 # 2026-11-17 at 163,840 tokens: 6.52 GiB with 7 draft tokens, 6.83 with 9, 7.15 with 11, 7.84 with 15,
 # which is 0.158 to 0.165 GiB per token. A little more is reserved here.
 KV_PER_DRAFT_TOKEN_GIB = 0.17
-# Free VRAM the server needs beside its KV pool: weights and runtime (20.4 GiB measured) plus a margin.
-# With less, Windows pages GPU memory and the speed drops to a quarter (prefill 1,825 against 8,800 tok/s).
-FIT_RESERVE_GIB = 21.0
+# Free VRAM the server needs beside its KV pool. Measured 2026-11-17: weights and runtime take 20.3 GiB at the
+# start and grow to 21.3 GiB with long sessions, and Windows starts paging GPU memory about 0.65 GiB before
+# the card is full (nvidia-smi then stays at 31.9 of 32.6 GiB). With less than this reserve the model still
+# starts and short prompts are fast, but a session of 163K tokens decoded at 83 instead of 380 tok/s.
+FIT_RESERVE_GIB = 22.0
+# Linux has no such paging: the card can be used to its end, and a server that needs more fails at once.
+# Not measured on a Linux machine; the 0.15 GiB kept of the 0.65 are for that.
+LINUX_RESERVE_RELIEF_GIB = 0.5
 # What vision adds to that. Measured 2026-11-17: the image encoder's weights take 0.86 GiB (vLLM reports
 # 18.88 instead of 18.02 GiB for the model), and reading the largest image (16.7 million pixels, 16,384 tokens)
 # needs another 0.75 GiB for a moment, a 4K screenshot 0.54 GiB. Without this reserve the card ran full with a
@@ -59,13 +72,13 @@ def kv_fixed_gib(draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> float:
 
 
 def kv_pool_bytes(context: int, draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> int:
-    return int((kv_fixed_gib(draft_tokens) + context / KV_TOKENS_PER_GIB) * 1.01 * 2 ** 30)
+    return int((kv_fixed_gib(draft_tokens) + context / KV_TOKENS_PER_GIB) * KV_MARGIN * 2 ** 30)
 
 
 def fit_context(free_mib: float, max_context: int, reserve_gib: float = FIT_RESERVE_GIB,
                 draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> tuple[int, int] | None:
     """Largest context (and its KV pool in bytes) that fits into the free VRAM, or None if too little is free."""
-    tokens = (free_mib / 1024 - reserve_gib - kv_fixed_gib(draft_tokens)) * KV_TOKENS_PER_GIB
+    tokens = ((free_mib / 1024 - reserve_gib) / KV_MARGIN - kv_fixed_gib(draft_tokens)) * KV_TOKENS_PER_GIB
     context = min(max_context, int(tokens) // FIT_STEP * FIT_STEP)
     if context < MIN_FIT_CONTEXT:
         return None
@@ -192,7 +205,7 @@ class WslLauncher:
             f"VLLM_PORT={config.api_port}",
             f"CTX={preset['context']}",
             f"KV_BYTES={preset['kv_bytes']}",
-            f"MAX_SEQS={preset['max_seqs']}",
+            f"MAX_SEQS={config.slots}",
         ]
         if abs(config.gpu_memory_utilization - 0.92) > 1e-9:
             env.append(f"GPU_UTIL={config.gpu_memory_utilization}")
@@ -203,7 +216,7 @@ class WslLauncher:
             env.append(f"VLLM_PREFIX={config.vllm_prefix}")
         if config.model_base:
             env.append(f"MODEL_BASE={config.model_base}")
-        if config.draft_tokens != DEFAULT_DRAFT_TOKENS and preset["max_seqs"] == 1:
+        if config.draft_tokens != DEFAULT_DRAFT_TOKENS:
             env.append(f"SPEC_TOKENS={config.draft_tokens}")
         if config.vision:
             # vLLM keys its cache of compiled graphs without the multimodal settings, but with images on the
@@ -530,47 +543,43 @@ class Supervisor:
                 checks.append({"id": "vram", "label": "Free VRAM", "ok": False, "blocking": False,
                                "detail": f"Cannot read nvidia-smi: {exc}"})
             if row and row.get("mem_total") and row.get("mem_free") is not None:
-                # The model ends up holding about what vLLM budgets (measured 29.6 GiB at 0.92 x 31.8 GiB).
                 vision = self.config.vision
-                need = math.ceil(self.config.gpu_memory_utilization * row["mem_total"]
-                                 + (VISION_RESERVE_GIB * 1024 if vision else 0))
-                enough = row["mem_free"] >= need
                 preset = PRESETS[self.preset]
-                drafts = self.config.draft_tokens if preset["max_seqs"] == 1 else DEFAULT_DRAFT_TOKENS
+                drafts = self.config.draft_tokens
                 more_drafts = drafts > DEFAULT_DRAFT_TOKENS  # the preset's KV pool is sized for the default
-                if self.config.fit_context and preset["max_seqs"] == 1 and (not enough or more_drafts or vision):
-                    fitted = fit_context(row["mem_free"], preset["context"],
-                                         preset.get("fit_reserve_gib", FIT_RESERVE_GIB)
-                                         + (VISION_RESERVE_GIB if vision else 0), drafts)
-                elif more_drafts:
-                    fitted = (preset["context"], kv_pool_bytes(preset["context"], drafts))
+                reserve = (preset.get("fit_reserve_gib", FIT_RESERVE_GIB) + (VISION_RESERVE_GIB if vision else 0)
+                           - (LINUX_RESERVE_RELIEF_GIB if self.config.mode == "native" else 0))
+                # What must be free for the preset's whole context: the reserve and the KV pool for it. Up to
+                # 1.5.0 this was 0.92 of the card (29.3 GiB), which let the full context start on a card that
+                # then ran full: fast with short prompts, paging with long ones.
+                need = math.ceil((reserve + kv_pool_bytes(preset["context"], drafts) / 2 ** 30) * 1024)
+                enough = row["mem_free"] >= need
+                if self.config.fit_context:
+                    fitted = fit_context(row["mem_free"], preset["context"], reserve, drafts)
                 reduced = fitted is not None and fitted[0] < preset["context"]
                 tight = not enough and not self.config.fit_context and row["mem_free"] >= need - VRAM_TOLERANCE_MIB
-                detail = f"{_gib(row['mem_free'])} GiB free, the model takes about {_gib(need)} GiB"
+                detail = (f"{_gib(row['mem_free'])} GiB free, {_dots(preset['context'])} tokens need about "
+                          f"{_gib(need)} GiB")
                 if reduced:
                     detail += f"; context reduced to {_dots(fitted[0])} tokens"
                 checks.append({"id": "vram", "label": "Free VRAM", "ok": enough or tight or fitted is not None,
                                "warn": tight or reduced, "blocking": False,
                                "free_mib": row["mem_free"], "need_mib": need, "detail": detail})
-                if reduced and enough:
-                    causes = ([f"{drafts} draft tokens per round"] if more_drafts else []) + (["vision"] if vision else [])
-                    warning = (f"With {' and '.join(causes)} the model needs more memory, so the context "
-                               f"is {_dots(fitted[0])} instead of {_dots(preset['context'])} tokens. "
-                               + (f"Set draft_tokens to {DEFAULT_DRAFT_TOKENS} for the largest context."
-                                  if not vision else "Switch them off in the settings for the largest context."))
-                elif reduced:
-                    warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM is free. For {_dots(preset['context'])} "
-                               f"tokens the model needs about {_gib(need)} GiB, so the context is reduced to "
+                if reduced:
+                    warning = (f"{_gib(row['mem_free'])} GiB of VRAM is free. For {_dots(preset['context'])} "
+                               f"tokens the model needs about {_gib(need)} GiB free, so the context is "
                                f"{_dots(fitted[0])} tokens. "
                                + ("Otherwise the server runs out of GPU memory. " if self.config.mode == "native" else
-                                  "Otherwise Windows pages out GPU memory and the speed drops to a quarter. ")
-                               + "For the full context, close other GPU programs and start again."
+                                  "Otherwise Windows pages out GPU memory and long sessions get several times "
+                                  "slower. ")
+                               + "For a larger context, close other GPU programs or run the displays on another "
+                                 "graphics card, then start again."
                                + (f" {drafts} draft tokens per round also take part of the memory."
                                   if more_drafts else "")
                                + (f" Vision takes {VISION_RESERVE_GIB} GiB of it; switch it off in the settings "
                                   "for a larger context." if vision else ""))
                 if tight:
-                    warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM was free at the start, and the model takes "
+                    warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM was free at the start, and the model needs "
                                f"about {_gib(need)} GiB. "
                                + ("The start can fail with an out-of-memory error." if self.config.mode == "native" else
                                   "Windows then pages out the GPU memory of other programs. "
@@ -618,6 +627,8 @@ class Supervisor:
     def effective_preset(self) -> dict:
         """The preset, with context and KV pool replaced when they were fitted to the free VRAM."""
         preset = dict(PRESETS[self.preset])
+        # The pool always follows the context and the draft tokens; the number in the preset is not used.
+        preset["kv_bytes"] = kv_pool_bytes(preset["context"], self.config.draft_tokens)
         if self.fitted:
             preset["context"] = self.fitted[0]
             if self.fitted[1]:
@@ -663,7 +674,7 @@ class Supervisor:
             return
         command = self.launcher.command(preset)
         self.log.add(f"=== Start: preset {self.preset}, context {preset['context']}, "
-                     f"KV {preset['kv_bytes']} bytes, {preset['max_seqs']} slot(s)", "step")
+                     f"KV {preset['kv_bytes']} bytes, {self.config.slots} slot(s)", "step")
         try:
             # Its own session on Linux: Ctrl+C in the terminal reaches the station only, which then
             # stops the server in order.
@@ -712,7 +723,7 @@ class Supervisor:
 
     def refresh_clients(self, write: bool) -> None:
         preset = self.effective_preset()
-        result = clients.register_all(self.config.api_base_url, preset["context"], preset["max_seqs"],
+        result = clients.register_all(self.config.api_base_url, preset["context"], self.config.slots,
                                       dry_run=not write, variant=preset.get("variant", ""),
                                       api_key=self.config.api_key, key_file=data_dir() / KEY_FILE,
                                       vision=self.config.vision)
@@ -848,7 +859,21 @@ class Supervisor:
             if text.startswith("=== AUTOTUNE:") and RETUNE_WARNING not in self.warning:
                 self.warning = f"{self.warning} {RETUNE_WARNING}".strip()
         if READY_MARKER in text:
-            self.mark_ready()
+            # The server says it listens. On Windows the way to it, WSL's forwarding of 127.0.0.1, appears up to
+            # a second later: three requests sent right at "Ready" were refused in a test on 2026-11-17.
+            threading.Thread(target=self._ready_when_reachable, name="ready", daemon=True).start()
+
+    def _ready_when_reachable(self, patience: float = 10.0) -> None:
+        url = f"http://{self.config.local_host}:{self.config.api_port}/health"
+        deadline = time.time() + patience
+        while time.time() < deadline and self.state == "starting":
+            try:
+                if http_get(url, timeout=1.0)[0] == 200:
+                    break
+            except (OSError, urllib.error.URLError):
+                pass
+            time.sleep(0.2)
+        self.mark_ready()
 
     def mark_ready(self) -> None:
         with self._lock:

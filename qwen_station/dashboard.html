@@ -428,6 +428,11 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
           <input class="short" id="draftTokens" type="number" inputmode="numeric">
           <p class="err" hidden></p>
         </div>
+        <div class="row" data-key="slots">
+          <div><label for="slots">Requests at the same time</label><small>The slots share the context. A slot costs nothing; every request that runs takes about 52,000 tokens of the context for its own state, plus its text. A request that does not fit waits.</small></div>
+          <input class="short" id="slots" type="number" inputmode="numeric">
+          <p class="err" hidden></p>
+        </div>
         <div class="row">
           <div><label for="vision">Vision</label><small>The model reads images in requests, up to 4 per request. The image encoder needs up to 1.7 GiB of VRAM, so the context gets one or two steps of 32,768 tokens smaller.</small></div>
           <input class="switch" id="vision" type="checkbox" role="switch">
@@ -587,7 +592,7 @@ function render() {
   $("title").textContent = s.model.title;
   const preset = s.presets[s.preset];
   const build = s.facts.vllm_version ? `, vLLM ${s.facts.vllm_version}` : "";
-  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${preset.max_seqs === 1 ? "1 slot" : preset.max_seqs + " slots"}${build}`;
+  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${s.model.max_seqs === 1 ? "1 slot" : s.model.max_seqs + " slots"}${build}`;
   $("baseUrl").textContent = s.api.base_url;
   $("modelId").textContent = s.api.model;
   $("mockTag").hidden = !s.station.mock;
@@ -1109,7 +1114,8 @@ function updateSettings() {
     + `<dt>Model</dt><dd><code>${esc(settingsData.model)}</code></dd>`;
   $("sumApi").textContent = (reach === "local" ? "This computer only" : reach === "all" ? "All networks" : host || "One address")
     + (key ? ", with key" : shared ? ", no key" : "");
-  $("sumModel").textContent = `${$("draftTokens").value} draft tokens` + ($("vision").checked ? ", vision" : "")
+  $("sumModel").textContent = `${$("draftTokens").value} draft tokens` + ($("slots").value > 1 ? `, ${$("slots").value} slots` : "")
+    + ($("vision").checked ? ", vision" : "")
     + ($("autostart").checked ? ", starts with the app" : "");
   $("sumApp").textContent = radio("closeAction") === "keep" ? "Closing keeps the model" : "Closing stops the model";
   $("sumLab").textContent = $("extraArgs").value.trim() || $("extraEnv").value.trim() ? "In use" : "Nothing set";
@@ -1157,6 +1163,8 @@ function fillSettings(data) {
   $("stationPort").value = v.station_port;
   $("draftTokens").value = v.draft_tokens;
   [$("draftTokens").min, $("draftTokens").max] = data.limits.draft_tokens;
+  $("slots").value = v.slots;
+  [$("slots").min, $("slots").max] = data.limits.slots;
   for (const id of ["apiPort", "stationPort"]) [$(id).min, $(id).max] = data.limits.port;
   $("fitContext").checked = v.fit_context;
   $("vision").checked = v.vision;
@@ -1180,7 +1188,7 @@ async function openSettings() {
 }
 async function saveSettings() {
   const whole = (id) => /^\d+$/.test($(id).value.trim()) ? Number($(id).value) : null;
-  const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens") };
+  const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens"), slots: whole("slots") };
   for (const [key, value] of Object.entries(numbers)) if (value === null) { settingsError(key, "Enter a whole number."); return; }
   const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked, vision: $("vision").checked,
     autostart: $("autostart").checked, register_clients: $("registerClients").checked, close_action: radio("closeAction"),

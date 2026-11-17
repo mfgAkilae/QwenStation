@@ -74,8 +74,7 @@ class ClientRegistrationTests(unittest.TestCase):
         self.register(context=98304, max_seqs=2)
         model = json.loads(self.opencode.read_text(encoding="utf-8"))["provider"]["vllm"]["models"]["qwen38-gittensor-dflash"]
         self.assertEqual(model["limit"], {"context": 98304, "output": 16000})
-        self.assertIn("96K", model["name"])
-        self.assertIn("2 Slots", model["name"])
+        self.assertTrue(model["name"].endswith("98K (RTX 5090) - 2 slots"))
 
     def test_variant_shows_in_the_model_name(self):
         clients.register_all(URL, 81920, 1, opencode_file=self.opencode, pi_file=self.pi, variant="Unsloth NVFP4")

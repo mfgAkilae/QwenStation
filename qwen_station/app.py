@@ -151,13 +151,13 @@ class Station:
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "vision": self.config.vision,
                       "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else ""),
                       "context": snapshot["context"],
-                      "max_seqs": preset["max_seqs"]},
+                      "max_seqs": self.config.slots},
             # The key itself never leaves the app again once it is saved; a hint tells that one is set.
             "api": {"base_url": self.config.api_base_url, "network_url": settings.network_url(self.config),
                     "host": self.config.bind_host, "key_hint": settings.key_hint(self.config.api_key),
                     "model": MODEL_ID},
             "settings_pending": sorted(self.pending),
-            "presets": {name: {key: values[key] for key in ("label", "context", "max_seqs", "note")}
+            "presets": {name: {key: values[key] for key in ("label", "context", "note")}
                         for name, values in PRESETS.items()},
             **snapshot,
             "setup": self.setup.snapshot(),
@@ -193,6 +193,7 @@ class Station:
                 "model": MODEL_ID,
                 "file": "" if self.config.mock else str(self.settings_file),
                 "limits": {"draft_tokens": [settings.DEFAULT_DRAFT_TOKENS, settings.MAX_DRAFT_TOKENS],
+                           "slots": [1, settings.MAX_SLOTS],
                            "port": [settings.MIN_PORT, 65535]}}
 
     def save_settings(self, changes: dict) -> dict:
@@ -611,6 +612,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Leave the OpenCode and Pi entries alone (for experiments)")
     parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
                         help="Do not shrink the context automatically when VRAM is short")
+    parser.add_argument("--slots", type=int, dest="slots",
+                        help="Requests the server works on at the same time (default 1); they share the context")
     parser.add_argument("--vision", action="store_true", default=None,
                         help="Load the image encoder, so requests may contain images (costs VRAM, so context)")
     parser.add_argument("--draft-tokens", type=int, dest="draft_tokens",
@@ -651,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {key: getattr(args, key) for key in
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
-                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots",
                       "register_clients")}
         config = load_config(args.config, overrides)
         if config.mock:

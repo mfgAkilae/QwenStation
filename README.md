@@ -16,10 +16,12 @@ what the model is doing. For Windows and for Linux.
 - **Context:** as much as the free VRAM holds without paging, up to 229,376 tokens on Windows and the model's
   262,144 on Linux; 163,840 to 196,608 when a desktop runs on the same card. See
   [Free VRAM decides the context size](#free-vram-decides-the-context-size).
-- **Verified runs on LocalMaxxing**
-  ([listed here](https://www.localmaxxing.com/en/models/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090)):
-  381.5 tok/s on `reasoning-v1` and 293 tok/s on `code-v1` with the default setting; 439.9 and 290.5 tok/s
-  with `draft_tokens` 15
+- **Runs on LocalMaxxing**
+  ([listed here](https://www.localmaxxing.com/en/models/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090)).
+  Verified, one stream: 381.5 tok/s on `reasoning-v1` and 293 tok/s on `code-v1` with the default setting;
+  439.9 and 290.5 tok/s with `draft_tokens` 15. With 4 slots and four streams at once: 1,324.6 tok/s on
+  `reasoning-v1` and 976.7 on `code-v1`, all streams together. The site gives its Verified badge to single
+  streams only, so these two are listed without it.
 
 ![The dashboard while the model answers a request](docs/dashboard.png)
 
@@ -344,6 +346,15 @@ Measured on 2026-11-17 (decode tok/s; short prompts unless stated):
 | A session of 163K tokens and a short request at once | 380 and 200 | |
 | The same two, one after the other (1 slot) | 390 and 480 | |
 | Sessions of 163K and 113K tokens at once, which do not fit together | 385 and 400 | the second one waited 30 to 53 s |
+
+The same on LocalMaxxing, measured with its own tool on 2026-11-17 (four streams, five rounds): 1,324.6 tok/s
+on `reasoning-v1` (1,235 to 1,355) and 976.7 on `code-v1` (897 to 1,079), against 381.5 and 293 with one stream.
+Its decode matrix, which writes plain prose, gave 201, 395 and 679 tok/s for 1, 2 and 4 streams
+([run](https://www.localmaxxing.com/en/inference-benchmarks/cmwkp22m807z3mi015s8glsuu)).
+
+How many requests really run at once depends on the pool. With a context of 163,840 tokens the pool holds
+four requests' own state and about 10,000 tokens beside it: enough for four short requests, not for four long
+ones. With a larger context, or fewer requests, there is more room.
 
 Requests that run together move at the pace of the longest context among them, so a short request beside a
 long session gets about half its usual speed. Answers can differ in single words from the ones the same request

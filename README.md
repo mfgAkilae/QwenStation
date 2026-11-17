@@ -22,14 +22,16 @@ what the model is doing.
 
 ## Install
 
-1. Download `Qwen-Station-<version>-windows-x64.zip` from the releases and unpack it.
-2. Start `Qwen-Station.exe`. The file is not signed, so Windows SmartScreen warns: "More info", then
-   "Run anyway".
-3. The window lists what the machine needs. Choose a folder for engine and model and click **Set up**.
+1. Download `Qwen-Station-Setup-<version>.exe` from the
+   [latest release](https://github.com/mfgAkilae/QwenStation/releases/latest) and start it. There is nothing
+   to unpack. The file is not signed, so Windows SmartScreen warns: "More info", then "Run anyway".
+2. The window lists what the machine needs and suggests a folder on the drive with the most free space.
+   Click **Set up**.
 
 ![The setup view](docs/setup.png)
 
-The setup then runs without further questions:
+That click is the only one. The setup then runs without further questions, and the model starts by itself
+at the end. You can delete the downloaded file afterwards; the app starts from the Start menu.
 
 | Step | What happens |
 |---|---|
@@ -150,7 +152,7 @@ served page, so other websites cannot control the app.
 python run-station.py --mock            # fake server instead of the model: the dashboard without a GPU
 python run-station.py --check           # state of the installation as JSON
 python -m unittest discover -s tests    # 51 tests; they start the mock server as a real subprocess
-.\build-exe.ps1 -Release                # dist\Qwen-Station.exe and the release zip with its SHA256 file
+.\build-exe.ps1 -Release                # dist\Qwen-Station-Setup-<version>.exe with its SHA256 file
 ```
 
 `build-exe.ps1` creates its own venv in `.build\` and installs PyInstaller there.

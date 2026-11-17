@@ -1,6 +1,6 @@
 # Builds Qwen-Station.exe (one file, no console window) with PyInstaller.
 #   .\build-exe.ps1                 build into .\dist
-#   .\build-exe.ps1 -Release        build, then pack dist\Qwen-Station-<version>-windows-x64.zip with a SHA256 file
+#   .\build-exe.ps1 -Release        build, then write dist\Qwen-Station-Setup-<version>.exe with a SHA256 file
 #   .\build-exe.ps1 -Install -InstallDir <folder>   build and copy the exe into a hand-built engine folder (legacy mode)
 #   .\build-exe.ps1 -SkipTests      skip the unit tests before building
 param(
@@ -64,16 +64,12 @@ if ($Install) {
 if ($Release) {
     $version = (& $venvPython -c "import qwen_station; print(qwen_station.__version__)").Trim()
     if ($LASTEXITCODE -ne 0 -or -not $version) { throw 'Could not read the version.' }
-    $stage = Join-Path $build 'release'
-    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-    New-Item -ItemType Directory -Path $stage | Out-Null
-    Copy-Item $exe $stage
-    Copy-Item (Join-Path $PSScriptRoot 'RELEASE-README.txt') (Join-Path $stage 'README.txt')
-    $zip = Join-Path $PSScriptRoot "dist\Qwen-Station-$version-windows-x64.zip"
-    if (Test-Path $zip) { Remove-Item $zip -Force }
-    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
-    $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-    Set-Content -Path "$zip.sha256" -Value "$hash  $(Split-Path $zip -Leaf)" -Encoding ascii
-    Write-Host "Release: $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+    # The exe is installer and app in one, so the release is this single file: nothing to unpack.
+    # Started from anywhere, it copies itself to %LOCALAPPDATA%\Programs\Qwen Station under its regular name.
+    $setup = Join-Path $PSScriptRoot "dist\Qwen-Station-Setup-$version.exe"
+    Copy-Item $exe $setup -Force
+    $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+    Set-Content -Path "$setup.sha256" -Value "$hash  $(Split-Path $setup -Leaf)" -Encoding ascii
+    Write-Host "Release: $setup ($([math]::Round((Get-Item $setup).Length / 1MB, 1)) MB)"
     Write-Host "SHA256:  $hash"
 }

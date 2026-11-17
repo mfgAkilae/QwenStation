@@ -117,6 +117,21 @@ An AppImage mounts itself with FUSE (`fusermount`), which desktop distributions 
 (containers, minimal servers) the start says so; start the file once with `--appimage-extract-and-run` as its
 first option instead. The installed app does not need FUSE.
 
+**NixOS** (not tested by us): an AppImage runs there through `appimage-run`, and the NVIDIA driver is not in the
+library folders that the setup and the prebuilt packages expect. Without it the setup stops at "CUDA compiler"
+with "libcuda.so of the NVIDIA driver is missing". A NixOS user reported that the setup finds the driver with
+this configuration:
+
+```nix
+programs.appimage = {
+  enable = true;
+  binfmt = true;
+  package = pkgs.appimage-run.override {
+    extraPkgs = pkgs: [ config.hardware.nvidia.package ];
+  };
+};
+```
+
 A newer version updates an existing installation the same way: start the new AppImage, it replaces the app and
 the changed parts of the engine. That also works for an installation made with the `.run` file of 1.1.0 or 1.2.0.
 

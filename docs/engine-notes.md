@@ -82,6 +82,21 @@ and every extra draft token needs one more state snapshot per Mamba layer in the
 
 ## Tried and dropped
 
+- **B12X** (`b12x` 1.5.1, the version vLLM 0.32 pins; measured 2026-11-17 in rounds per second, which do not
+  depend on the text: 65 with a short prompt, 62 behind 33K and 54.5 behind 137K tokens as the baseline).
+  - As attention backend it is not released for hybrid models: vLLM aligns the KV storage block to the Mamba
+    page (1,664 tokens) and B12X accepts only 64 or 128. With the two checks relaxed to "a multiple of 64" and
+    `--kernel-config.enable_cutedsl_warmup false` (the warmup of this version pair fails with
+    `'Tensor' object has no attribute 'fake_mode'`) it runs and keeps the same tokens per round. Reading a long
+    context gets faster: 9,838 against 9,188 tok/s for 33K tokens, 4,761 against 4,057 tok/s for 137K (29 instead
+    of 34 seconds). Decode gets slower behind long contexts: 57 against 62 rounds per second at 33K, 49.5 against
+    54.5 at 137K. XQA stays the better decode kernel, and a backend can only be chosen per layer group, not
+    separately for prefill and decode.
+  - Its NVFP4 linear kernels bring nothing: `--linear-backend flashinfer_b12x` 64 and 53.6 rounds per second
+    (short, 137K), the native kernel (`--kernel-config.linear_backend_per_quant.nvfp4_w4a4 b12x`) 62 and 52.8,
+    against 65 and 54.5 with FlashInfer's CUTLASS kernel and the verified tuning. `--linear-backend b12x` for
+    everything fails at the drafter's FP8 layers, and `flashinfer_cutedsl` picks a W4A16 kernel and runs out of
+    memory.
 - **DSpark drafter** (`gittensor-model-hub/Qwen3.8-27B-DSpark-NVFP4`, trained against this very checkpoint). vLLM
   0.32 has its own DSpark code and loads the drafter once the exclude patterns in its `hf_quant_config.json` start
   with `*` (vLLM prefixes the layer names with `model.`, so `markov_head*` matches nothing and the unquantized

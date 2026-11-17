@@ -67,6 +67,9 @@ LINUX_RESERVE_RELIEF_GIB = 0.5
 # large image, Windows paged, and text got 20 to 55 percent slower.
 VISION_RESERVE_GIB = 1.7
 MIN_FIT_CONTEXT = 65536
+# Main session first: subagents get at least this much context. Where less fits beside a main session of the
+# full context, they still get it and wait while the main session needs the room.
+MIN_SUBAGENT_CONTEXT = 65536
 # Coarse steps on purpose: every distinct context is a new server configuration, and each of those runs
 # once without the verified kernel tuning (see RETUNE_WARNING). Six sizes instead of fifty.
 FIT_STEP = 32768
@@ -96,6 +99,16 @@ def fit_context(free_mib: float, max_context: int, reserve_gib: float = FIT_RESE
         return None
     pool = kv_pool_bytes(context, draft_tokens, kv_cache)
     return context, max(pool, int(room * 2 ** 30)) if fill else pool
+def subagent_context(kv_bytes: int, context: int, draft_tokens: int = DEFAULT_DRAFT_TOKENS,
+                     kv_cache: str = "fp8") -> tuple[int, bool]:
+    """Main session first: the context of the subagent model, and whether it fits into the pool beside a main
+    session of the full context. Each running request has its own fixed part (calibration above)."""
+    per_gib = KV_CALIBRATION[kv_cache][1]
+    left = (kv_bytes / 2 ** 30 / KV_MARGIN - 2 * kv_fixed_gib(draft_tokens, kv_cache) - context / per_gib) * per_gib
+    tokens = max(0, int(left)) // 1024 * 1024
+    return min(context, max(MIN_SUBAGENT_CONTEXT, tokens)), tokens >= MIN_SUBAGENT_CONTEXT
+
+
 # Measured 2026-11-16 on vLLM 0.29.0: 128 against 254 tok/s at 33K context, 51 against 178 tok/s at 129K.
 XQA_WARNING = ("The server uses the XQA decode kernel. With spec decode, the speed drops sharply at long context "
                "(measured up to 3.5 times slower). The current start script forces the native kernel.")
@@ -233,6 +246,8 @@ class WslLauncher:
             env.append(f"SPEC_TOKENS={config.draft_tokens}")
         if config.ram_cache_gib:
             env.append(f"KV_OFFLOAD_GIB={config.ram_cache_gib}")
+        if preset.get("subagent_context"):
+            env.append(f"SUBAGENT_CTX={preset['subagent_context']}")  # main session first
         env.append(f"KV_DTYPE={config.kv_cache}")  # before extra_env, which may still override it
         if config.vision:
             # vLLM keys its cache of compiled graphs without the multimodal settings, but with images on the
@@ -507,6 +522,8 @@ class Supervisor:
                 "warning": self.warning if self.state in ("starting", "ready") else "",
                 "preset": self.preset,
                 "context": self.effective_preset()["context"],
+                "subagent_context": self.effective_preset().get("subagent_context"),
+                "subagent_fits": self.effective_preset().get("subagent_fits"),
                 "preflight": self.preflight,
                 "gpu_processes": self.gpu_processes,
                 "facts": dict(self.facts),
@@ -604,6 +621,12 @@ class Supervisor:
                                   "The start takes longer and the speed can suffer."))
                 if not enough:
                     processes = gpu.gpu_processes(max_mib=row["mem_total"])
+                if fitted is None and enough and self.main_first():
+                    # Main session first with the automatic off: the context stays, but the pool takes the VRAM
+                    # the reserve leaves, as the room for the subagents.
+                    room = int((row["mem_free"] / 1024 - reserve) * 2 ** 30)
+                    if room > kv_pool_bytes(preset["context"], drafts, kv_cache):
+                        fitted = (preset["context"], room)
         with self._lock:
             self.preflight = checks
             self.gpu_processes = processes
@@ -651,7 +674,14 @@ class Supervisor:
             preset["context"] = self.fitted[0]
             if self.fitted[1]:
                 preset["kv_bytes"] = self.fitted[1]
+        if self.main_first() and not self.external:
+            preset["subagent_context"], preset["subagent_fits"] = subagent_context(
+                preset["kv_bytes"], preset["context"], self.config.draft_tokens, self.config.kv_cache)
         return preset
+
+    def main_first(self) -> bool:
+        """The setting applies: it needs a second slot."""
+        return self.config.main_first and self.config.slots > 1
 
     def _start(self, force: bool) -> None:
         port_state, card = self.probe_api()
@@ -692,7 +722,9 @@ class Supervisor:
             return
         command = self.launcher.command(preset)
         self.log.add(f"=== Start: preset {self.preset}, context {preset['context']}, "
-                     f"KV {preset['kv_bytes']} bytes, {self.config.slots} slot(s)", "step")
+                     f"KV {preset['kv_bytes']} bytes, {self.config.slots} slot(s)"
+                     + (f", main session first, subagents up to {preset['subagent_context']} tokens"
+                        if preset.get("subagent_context") else ""), "step")
         try:
             # Its own session on Linux: Ctrl+C in the terminal reaches the station only, which then
             # stops the server in order.
@@ -745,7 +777,7 @@ class Supervisor:
                                       dry_run=not write, variant=preset.get("variant", ""),
                                       api_key=self.config.api_key, key_file=data_dir() / KEY_FILE,
                                       vision=self.config.vision, agents=self.config.agents,
-                                      kv_cache=self.config.kv_cache)
+                                      kv_cache=self.config.kv_cache, subagent=preset.get("subagent_context", 0))
         for entry in result.values():
             if entry.get("changed"):
                 self.log.add(f"--- {entry['client']}: model {entry['model']} {entry['detail']} ({entry['path']})", "step")

@@ -19,7 +19,8 @@ from .config import (AGENT_IDS, KV_CACHE_TYPES, ANY_HOST, API_KEY_PATTERN, DEFAU
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Read when the model starts: a change waits for the next start while the model runs.
-MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "vision", "slots", "ram_cache_gib", "kv_cache",
+MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "vision", "slots", "main_first", "ram_cache_gib",
+              "kv_cache",
               "fit_context", "extra_args", "extra_env")
 # Read all the time: a change applies at once.
 APP_KEYS = ("autostart", "close_action", "agents")
@@ -28,7 +29,7 @@ RESTART_KEYS = ("station_port",)
 EDITABLE = MODEL_KEYS + APP_KEYS + RESTART_KEYS
 
 KINDS = {"api_host": str, "api_port": int, "api_key": str, "station_port": int, "draft_tokens": int,
-         "fit_context": bool, "vision": bool, "slots": int, "ram_cache_gib": int, "kv_cache": str,
+         "fit_context": bool, "vision": bool, "slots": int, "main_first": bool, "ram_cache_gib": int, "kv_cache": str,
          "extra_args": str, "extra_env": str, "autostart": bool, "close_action": str, "agents": list}
 MIN_PORT = 1024
 MAX_TEXT = 2000

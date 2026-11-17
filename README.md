@@ -18,9 +18,10 @@ file. Steps for [Windows](#install-on-windows) and for [Linux](#install-on-linux
 | **OpenAI-compatible API** | `http://127.0.0.1:8000/v1`, the unmodified vLLM endpoint. For this computer only by default; the settings open it for your network and generate an API key. [Settings](#settings) |
 | **A live dashboard** | Decode speed, GPU, time to the first token, KV cache, cache hits, draft acceptance, the last requests and the server log. [What the window shows](#what-the-window-shows) |
 | **Several requests at once** | Up to 4 slots that share the context. Four requests together reach about 1,370 tok/s. [Several requests at once](#several-requests-at-once) |
+| **An orchestrator that comes first** | Optional: the main session of a coding agent keeps the full context and goes first, subagents get the rest. [Main session first](#main-session-first) |
 | **Large sessions that take turns** | Kept in RAM, a session that another one pushed out of the GPU comes back in 1 second instead of 27. Made for two agents with 120,000 tokens each. [Sessions in RAM](#sessions-in-ram) |
 | **Vision** | Optional: up to 4 images per request. [Vision](#vision) |
-| **Your choice of coding agent** | T3 Code, OpenCode, Pi, DeepSeek Harness and Copilot in VS Code get the model with the right context size. You choose which in the settings; Qwen Station only adds its own entry to their configs. [Coding agents](#coding-agents) |
+| **Your choice of coding agent** | T3 Code, OpenCode, Pi, DeepSeek Harness and Copilot in VS Code get the model with the right context size. None is touched until you switch it on in the settings; then Qwen Station only adds its own entry to its config. [Coding agents](#coding-agents) |
 | **One settings window** | Network, API key, slots, RAM, vision, draft tokens and the coding agents in one place. There is a settings file and there are command line options too. [Settings](#settings) |
 | **Stays out of your system** | On Windows it runs in a WSL distribution of its own, on Linux in one folder of your user. Both can be removed completely. [Remove](#remove) |
 
@@ -130,8 +131,10 @@ In a test on Ubuntu 24.04 the setup took 6 minutes on a 35 MB/s connection and u
 ### Coding agents
 
 Qwen Station enters the model in the coding agents you choose, at every start of the model and right after you
-change the choice: **Settings, Coding agents**. By default all five are switched on, and the ones that are not on
-the computer are skipped. The setup asks nothing about it, so it stays one click.
+change the choice: **Settings, Coding agents**. None is switched on by default: until you choose an agent, Qwen
+Station changes no agent config. An agent you switch on that is not on the computer yet gets the model once it is
+installed. Up to 2.0.0 all five were on by default; after an update, Qwen Station keeps updating the agents that
+already have the model, until you change the choice.
 
 | Agent | What Qwen Station writes | Where you pick the model |
 |---|---|---|
@@ -155,6 +158,11 @@ and the reasoning levels `low`, `medium` and `xhigh`.
   placeholder `local` without a key, as DeepSeek Harness refuses a provider without one). VS Code keeps keys
   itself: enter the key once under Chat, Manage Models.
 - The panel **Use it in your coding agents** in the window shows the state of every agent you switched on.
+- **Subagents:** with [Main session first](#main-session-first) on, every agent you switched on also gets the model
+  `qwen38-gittensor-dflash-subagent` (in T3 Code, OpenCode and Pi `vllm/qwen38-gittensor-dflash-subagent`).
+  Choose it where your agent sets the model of its subagents, for example `agent.<name>.model` in OpenCode or
+  the model of a delegated task in T3 Code. The entry stays when you switch the setting off; the name then works
+  like the main model.
 
 ### Other clients
 
@@ -293,7 +301,7 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   "kv_cache": "nvfp4",
   "api_port": 8000,
   "station_port": 8010,
-  "agents": ["t3code", "opencode", "pi", "deepseek", "copilot"],
+  "agents": [],
   "extra_args": "",
   "extra_env": ""
 }
@@ -304,12 +312,14 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   engine folder on Linux). The earlier preset `parallel-96k` is now the setting `slots`.
 - `slots`: how many requests the server works on at the same time, 1 (default) to 4. See
   [Several requests at once](#several-requests-at-once).
+- `main_first`: `true` keeps the full context for the main session of a coding agent; subagents get the rest.
+  Needs `slots` of 2 or more. See [Main session first](#main-session-first).
 - `kv_cache`: `nvfp4` (default) or `fp8`, how the KV cache stores keys and values. See
   [The KV cache: NVFP4 or FP8](#the-kv-cache-nvfp4-or-fp8).
 - `ram_cache_gib`: how many GiB of RAM hold sessions that left the GPU, 0 (default, off) to 128. See
   [Sessions in RAM](#sessions-in-ram).
 - `agents`: the coding agents that get the model, any of `t3code`, `opencode`, `pi`, `deepseek` and `copilot`
-  (default: all). `[]` touches no agent. The older switch `register_clients: false` means `[]`.
+  (default: none, `[]`, so no agent config is touched). The older switch `register_clients: false` means `[]`.
 - `close_action`: `stop` ends the model when the window closes, `keep` leaves it running until **Quit**.
 - `api_host`: `127.0.0.1` (default), `0.0.0.0` or one IPv4 address of this computer, as described above.
   The older switch `lan: true` still works and means `0.0.0.0`.
@@ -326,8 +336,8 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 The same values work as command line options: `Qwen-Station.exe --preset 237k --keep --no-autostart`, on Linux
 `qwen-station --preset 237k --no-autostart`. `--check` prints the state of the installation as JSON and exits.
 `--setup` starts a needed setup without the click, `--location` names its folder. `--api-host 0.0.0.0` sets
-the address of the API for one run, `--kv-cache fp8` the KV cache, `--agents opencode,pi` the coding agents, and `--no-register-clients` leaves
-every agent alone.
+the address of the API for one run, `--kv-cache fp8` the KV cache, `--main-first` the setting of that name,
+`--agents opencode,pi` the coding agents, and `--no-register-clients` leaves every agent alone.
 
 ## Speed
 
@@ -447,6 +457,52 @@ Requests that run together move at the pace of the longest context among them, s
 long session gets about half its usual speed. Answers can differ in single words from the ones the same request
 gets alone (in the tests one to two of four did): batches are computed slightly differently, as in vLLM without
 a drafter. More draft tokens per round and vision work with several slots.
+
+### Main session first
+
+**Settings, Model, Main session first** (`main_first`, `--main-first`; off by default, needs 2 slots or more).
+For a coding agent that hands work to subagents: its main session, the orchestrator, always has room for the
+model's full context and is served first. Subagents get what is left.
+
+The server answers to a second model name for this, `qwen38-gittensor-dflash-subagent`. It is the same loaded
+model under another name, so it costs no VRAM, and both names share the KV cache. The name is how the server tells
+the two apart: there are no fixed slots, and every turn of an agent is a request of its own. Choose that model for
+the subagents of your agent (see [Coding agents](#coding-agents)). Then:
+
+- A request of the main session that finds no free slot, or no room for its context, pushes out the subagent
+  request that came last. The subagent goes on where it stopped as soon as there is room again; with
+  [Sessions in RAM](#sessions-in-ram) its KV is copied back instead of read again.
+- In every step the main session is served before the subagents.
+- The subagent model has a context of its own: the room beside a main session of the full context, but at
+  least 65,536 tokens. A longer prompt gets vLLM's usual error ("This model's maximum context length is ..."),
+  which coding agents take as the signal to compact. The window shows both numbers under the setting and in the
+  panel of the agents.
+
+With NVFP4 and 262,144 tokens for the main session (Windows):
+
+| Free at start | Subagents get | Beside a main session of the full context |
+|---|---|---|
+| 31.95 GiB (nothing else on the card) | 115,712 tokens | fits |
+| 31.5 GiB | 90,112 tokens | fits |
+| 31.0 GiB or less | 65,536 tokens | does not fit: while the main session uses most of its context, subagents wait |
+
+With a desktop on the same card (28.6 GiB free), a subagent of 65,536 tokens
+runs beside a main session of up to about 120,000 tokens, and waits while the main session is longer.
+
+Measured on 2026-11-17 with that pool (6.6 GiB, 2 slots), against first come, first served:
+
+| Case | First come, first served | Main session first |
+|---|---|---|
+| Two subagents that write take both slots, the main session sends a short request | first token after 25.4 s | after 0.1 s |
+| A subagent of 59K tokens writes 6,000 tokens, the main session sends 199K tokens; both do not fit together | first token after 117 s: it waited for the subagent | after 67 s, its own reading time; the subagent paused and finished after it |
+
+The subagent that paused came back with 1.3 GB copied from RAM; without sessions in RAM it read its prompt
+again and finished 16 seconds later. A subagent prompt of 69K tokens got the error above, the same prompt on the
+main model an answer.
+
+What it does not do: while the main session waits for its subagents, no request of it runs, and its context is
+only cached. Subagents may then push that cache out of the GPU. With sessions in RAM it comes back in about a
+second per 100,000 tokens, without them the main session reads it again.
 
 ### Sessions in RAM
 
@@ -595,6 +651,12 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   tokens against FP8, a session of 250K tokens and a prompt of 99.5 percent of 262,144 tokens with the pool the
   app computes; 2 slots with the pool that takes all free VRAM, two sessions of 149K tokens at once, and sessions
   in RAM with 2 and 4 slots.
+- **Main session first (2.1.0)**, on Windows with the real model in a development distribution: the patch
+  applied to an unchanged vLLM; with the pool of a desktop card and 2 slots, a subagent prompt beyond its limit,
+  two writing subagents in both slots, and a subagent that writes while the main session sends 199K tokens,
+  each with sessions in RAM and without, and against first come, first served.
+- **No coding agent by default (2.1.0)**, unit tests: a first start on a computer with all five agents writes no
+  file of theirs; settings from 2.0.0 keep the agents that already have the model.
 - **Coding agents (1.8.0)**, on Windows: the entries of all five agents into temporary copies of real configs
   (unit tests with the formats as the agents write them, including DeepSeek Harness's YAML with comments and
   other providers); DeepSeek Harness composing a copy of a real desktop profile with the new provider

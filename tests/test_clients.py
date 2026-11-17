@@ -253,6 +253,22 @@ class AgentTests(unittest.TestCase):
         self.t3.rmdir()
         self.assertEqual(self.register(agents=["t3code"])["t3code"]["status"], "missing")
 
+    def test_the_agents_that_already_have_the_model(self):
+        def found():
+            return clients.entered_agents(opencode_file=self.opencode, pi_file=self.pi, t3_dir=self.t3,
+                                          deepseek_dir=self.dsh, copilot_folders=[self.vscode])
+
+        self.assertEqual(found(), [])
+        self.pi.write_text(json.dumps({"providers": {"vllm": {"models": [{"id": "own-model"}]}}}), encoding="utf-8")
+        self.patch_file.write_text(DSH_PATCH, encoding="utf-8")
+        self.assertEqual(found(), [])  # a provider vllm of the user's own does not count
+        self.register(agents=["pi", "copilot"])
+        self.assertEqual(found(), ["t3code", "pi", "copilot"])
+        self.register(agents=["opencode", "deepseek"])
+        self.assertEqual(found(), list(clients.AGENT_IDS))
+        self.opencode.write_text("{ broken", encoding="utf-8")  # unreadable: counts as without the model
+        self.assertEqual(found(), ["t3code", "pi", "deepseek", "copilot"])
+
     def test_a_deselected_agent_keeps_its_entry(self):
         self.patch_file.write_text(DSH_PATCH, encoding="utf-8")
         self.register()
@@ -262,6 +278,40 @@ class AgentTests(unittest.TestCase):
         self.assertEqual({entry["status"] for entry in result.values()}, {"off"})
         self.assertEqual([path.read_bytes() for path in files], written)  # nothing removed, nothing changed
         self.assertEqual(list(result), list(clients.AGENT_IDS))
+
+    @unittest.skipUnless(yaml, "PyYAML is not installed")
+    def test_main_session_first_adds_a_subagent_model_that_then_stays(self):
+        sub = "qwen38-gittensor-dflash-subagent"
+
+        def contexts():
+            opencode = json.loads(self.opencode.read_text(encoding="utf-8"))["provider"]["vllm"]["models"]
+            pi = json.loads(self.pi.read_text(encoding="utf-8"))["providers"]["vllm"]["models"]
+            copilot = json.loads((self.vscode / "chatLanguageModels.json").read_text(encoding="utf-8"))[0]["models"]
+            deepseek = self.provider()["qwen-station"]["models"]
+            return {
+                "opencode": {key: entry["limit"]["context"] for key, entry in opencode.items()},
+                "pi": {entry["id"]: entry["contextWindow"] for entry in pi},
+                "copilot": {entry["id"]: entry["contextWindow"] for entry in copilot},
+                "deepseek": {entry["id"]: entry["contextWindow"] for entry in deepseek},
+            }
+
+        # Off and never on: no second model in any agent.
+        self.register()
+        for agent, models in contexts().items():
+            self.assertEqual(models, {clients.MODEL_ID: 196608}, agent)
+        # On: the subagent model with its own context, the main model as it was.
+        result = self.register(subagent=98304)
+        self.assertTrue(all(result[agent]["status"] == "ok" for agent in ("opencode", "pi", "deepseek", "copilot")))
+        for agent, models in contexts().items():
+            self.assertEqual(models, {clients.MODEL_ID: 196608, sub: 98304}, agent)
+        pi = json.loads(self.pi.read_text(encoding="utf-8"))["providers"]["vllm"]["models"]
+        self.assertEqual(pi[1]["name"], "Qwen3.8 27B subagent - FP8 KV - DFlash2 - 98K (RTX 5090)")
+        self.assertEqual(pi[1]["thinkingLevelMap"], pi[0]["thinkingLevelMap"])  # everything else as the main model
+        # Off again: the entry stays, since a subagent setting may name it, and is the same model again.
+        self.register()
+        for agent, models in contexts().items():
+            self.assertEqual(models, {clients.MODEL_ID: 196608, sub: 196608}, agent)
+        self.assertEqual(self.register(dry_run=True)["opencode"]["status"], "ok")  # and that is stable
 
     def test_the_default_paths_are_not_the_real_home(self):
         # tests/isolation.py moved every home folder; a forgotten path in a test lands there.

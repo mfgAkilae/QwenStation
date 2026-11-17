@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 MODEL_ID = "qwen38-gittensor-dflash"
+# The same model under a second name, for subagents. With "main session first" their requests yield to the main
+# session and get the context left beside it; without, the name works like the first one. Costs no VRAM.
+SUBAGENT_MODEL_ID = MODEL_ID + "-subagent"
 MODEL_TITLE = "Qwen3.8 27B"
 # How the KV cache stores keys and values: NVFP4 (4 bit, the default since 2.0) or FP8.
 KV_CACHE_TYPES = {"nvfp4": "NVFP4", "fp8": "FP8"}
@@ -105,12 +108,14 @@ class Config:
     gpu_match: str = "5090"
     gpu_memory_utilization: float = 0.92
     register_clients: bool = True  # off: no agent config is touched at all (--no-register-clients)
-    agents: list = field(default_factory=lambda: list(AGENT_IDS))  # where the model is entered; only adds
+    agents: list = field(default_factory=list)  # where the model is entered; only adds. None by default
     open_window: bool = True
     fit_context: bool = True  # shrink the context when too little VRAM is free, instead of paging
     draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
     vision: bool = False  # load the image encoder: requests may contain images, at the cost of some VRAM
     slots: int = 1  # requests the server works on at the same time; they share the context
+    main_first: bool = False  # with slots > 1: the main session always has room for the full context, subagents
+    #                           (model SUBAGENT_MODEL_ID) get what is left and yield to it
     ram_cache_gib: int = 0  # sessions pushed out of the GPU are kept in this much RAM; 0: off
     kv_cache: str = DEFAULT_KV_CACHE  # "nvfp4" (about 1.8 times the context per GiB) or "fp8"
     extra_args: str = ""  # appended to the `vllm serve` command line, for experiments
@@ -119,6 +124,9 @@ class Config:
     extra_env: str = ""  # "KEY=VALUE KEY2=VALUE2" for the start scripts, for experiments
     mock: bool = False
     config_path: str = ""
+    # Neither the settings nor the command line name the agents. Up to 2.0.0 that meant all of them; the app then
+    # keeps the ones that already have the model (clients.entered_agents), so an update changes nothing for them.
+    agents_unset: bool = False
     extra: dict = field(default_factory=dict)
 
     @property
@@ -250,6 +258,7 @@ _FILE_KEYS = {
     "slots": int,
     "ram_cache_gib": int,
     "kv_cache": str,
+    "main_first": bool,
     "extra_args": str,
     "vllm_prefix": str,
     "model_base": str,
@@ -309,6 +318,8 @@ def load_config(explicit_path: str | None = None, overrides: dict | None = None)
         # Up to 1.7.0 one switch covered OpenCode and Pi. Off meant no agent; the selection says that now.
         config.agents, config.register_clients = [], True
     root_from_file = "root" in file_values
+    config.agents_unset = "agents" not in file_values and (overrides or {}).get("agents") is None \
+        and file_values.get("register_clients") is not False
     for key, value in (overrides or {}).items():
         if value is not None:
             setattr(config, key, value)

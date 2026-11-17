@@ -132,6 +132,37 @@ arguments last and the last one wins, so the engine needs no change. Two things 
 The DFlash2 drafter is text-only; vLLM says so at the start ("Embeddings from the target model will not be
 passed to the drafter") and falls back to drafting from the text alone. XQA stays the decode kernel.
 
+**Main session first** (`main_first`, `SUBAGENT_CTX`, patch-vllm-main-first.py; measured 2026-11-17). With
+several slots vLLM serves first come, first served: when the pool runs out, the request that came last is pushed
+out, and a new request waits until its whole prompt fits (`scheduler_reserve_full_isl`, on by default). For a
+coding agent that can be its orchestrator, while its subagents keep running. The setting turns that around:
+
+- A second served name, `qwen38-gittensor-dflash-subagent`, marks the subagents' requests; it is served always,
+  so a subagent setting that names it keeps working with the setting off. The frontend gives it priority 1
+  (`GenerateBaseServing._get_priority`), and `--scheduling-policy priority` lets vLLM push out the lowest
+  priority when a running request needs blocks.
+- vLLM pushes out only for requests that already run. The patch adds the case of a waiting main request: when it
+  finds no slot, or found no room for its blocks in the step before, the next step pushes out the subagent request
+  that came last, one per step. Within a step the running list is ordered by priority, so the main session's
+  prefill chunks come first.
+- vLLM checks `_request_blocks_can_be_freed` before it pushes a request out. With sessions in RAM (an offloading
+  connector) and async scheduling, the blocks of a request that ran in the step before are freed one step late,
+  and a request that decodes runs in every step, so that check never lets it go: the first version of the patch
+  with it never pushed anyone out, and the main session waited 114 s. The patch skips the check, since nothing
+  needs the blocks at once and `_preempt_request` defers their return itself, and waits while such deferred
+  blocks are still on their way back before it pushes out the next one.
+- The subagent model's context limit goes through the same check as `max_model_len`
+  (`build_tok_params` of chat completions, completions and responses), so a longer prompt gets the usual error.
+  Its size: the room beside a main session of the full context, from the calibration above (two fixed parts),
+  at least 65,536 tokens.
+
+Measured with a pool of 6.6 GiB (a desktop card), 2 slots: two writing subagents in both slots, a short main
+request got its first token after 0.1 instead of 25.4 s. A subagent of 59K tokens writing 6,000 tokens and a main
+request of 199K tokens that does not fit beside it: first token after 67 s (its own prefill) instead of 117 s; the
+subagent paused, came back with 1.3 GB from RAM (without RAM: read again, done 16 s later), no tracebacks.
+Not covered: the cached prefix of an idle main session is evicted like any other (LRU); protecting it would need
+a change to the block pool.
+
 **An NVFP4 KV cache by default** (`kv_cache`, `KV_DTYPE=nvfp4`; FP8 as the setting; measured 2026-11-17). vLLM 0.32
 offers `--kv-cache-dtype nvfp4` for FlashInfer: keys and values in 4 bit with an FP8 scale per 16 values, so a
 token of an attention layer takes 0.5625 of its FP8 size. FlashInfer reads it for the prefill through its FA2

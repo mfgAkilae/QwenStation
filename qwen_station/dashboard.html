@@ -375,6 +375,7 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
     <section class="panel" aria-label="Connect">
       <h2>Use it in your coding agents</h2>
       <div class="clients" id="clients"></div>
+      <p class="hint" id="subagentHint" hidden></p>
       <p class="hint">Reasoning: <code>low</code>, <code>medium</code> or <code>xhigh</code>; this checkpoint knows no other levels. Which agents get the model: Settings, Coding agents.</p>
     </section>
 
@@ -456,6 +457,10 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
           <input class="short" id="slots" type="number" inputmode="numeric">
           <p class="err" hidden></p>
         </div>
+        <div class="row" data-key="main_first">
+          <div><label for="mainFirst">Main session first</label><small>For a coding agent that hands work to subagents. The main session always has room for the full context and is served first. Subagents use the model <code>qwen38-gittensor-dflash-subagent</code>: it is the same model, with the context that is left beside the main session, and its requests pause while the main session needs the room. Needs at least 2 slots.</small><small class="state" id="mainFirstNow" hidden></small></div>
+          <input class="switch" id="mainFirst" type="checkbox" role="switch">
+        </div>
         <div class="row" data-key="ram_cache_gib">
           <div><label for="ramCache">Sessions kept in RAM, in GiB</label><small>0 is off. A large session that another one pushed out of the GPU then comes back from RAM in about a second instead of being read again, which takes up to half a minute. About 3.5 GiB per 100,000 tokens. The RAM is taken when the model starts.</small></div>
           <input class="short" id="ramCache" type="number" inputmode="numeric">
@@ -478,7 +483,7 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
 
     <div class="sheet-pane" role="tabpanel" id="pane-agents" data-pane="agents" aria-labelledby="tab-agents" hidden>
       <h3>Coding agents</h3>
-      <p class="lead">Qwen Station enters the model, its address and its context in the agents you switch on, now and at every start of the model. It only adds its own entry: everything else in their configs stays, and the first change keeps a backup next to the file. Switched off, an agent is no longer updated and keeps its entry.</p>
+      <p class="lead">Qwen Station enters the model, its address and its context in the agents you switch on, now and at every start of the model. None is on until you choose it. It only adds its own entry: everything else in their configs stays, and the first change keeps a backup next to the file. Switched off, an agent is no longer updated and keeps its entry.</p>
       <div class="rows first" data-key="agents">
         <div id="agentRows"></div>
         <p class="err" hidden></p>
@@ -626,7 +631,11 @@ function render() {
   const preset = s.presets[s.preset];
   const build = s.facts.vllm_version ? `, vLLM ${s.facts.vllm_version}` : "";
   const ram = s.model.ram_cache_gib ? `, ${nf0.format(s.model.ram_cache_gib)} GiB of RAM for sessions` : "";
-  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${s.model.max_seqs === 1 ? "1 slot" : s.model.max_seqs + " slots"}${ram}${build}`;
+  const first = s.model.subagent_context ? ", main session first" : "";
+  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${s.model.max_seqs === 1 ? "1 slot" : s.model.max_seqs + " slots"}${first}${ram}${build}`;
+  $("subagentHint").hidden = !s.model.subagent_context;
+  $("subagentHint").innerHTML = s.model.subagent_context ? `Subagents: the model <code>${esc(s.model.subagent_id)}</code>, `
+    + `up to ${nf0.format(s.model.subagent_context)} tokens. The main session on <code>${esc(s.api.model)}</code> goes first.` : "";
   $("baseUrl").textContent = s.api.base_url;
   $("modelId").textContent = s.api.model;
   $("mockTag").hidden = !s.station.mock;
@@ -963,7 +972,7 @@ function renderClients(s) {
   const chosen = entries.filter((c) => c.selected !== false);
   if (!chosen.length) {
     box.innerHTML = `<p class="hint">${s.station.mock ? "Mock mode does not touch any agent configs."
-      : entries.length ? "No agent is switched on." : "Checked at start."}</p>`;
+      : entries.length ? "No agent is switched on, so Qwen Station changes no agent config." : "Checked at start."}</p>`;
     return;
   }
   const mark = { ok: "check", error: "x", outdated: "warn", missing: "warn" };
@@ -1210,10 +1219,19 @@ function updateSettings() {
     + (other ? `<dt>On other devices</dt><dd>${url(other)}</dd>` : "")
     + `<dt>API key</dt><dd>${keyDraft ? `<code>${esc(keyDraft)}</code>` : key ? `The key you copied when it was generated (<code>${esc(hint)}</code>)`
       : "None. A client that insists on one takes <code>local</code>."}</dd>`
-    + `<dt>Model</dt><dd><code>${esc(settingsData.model)}</code></dd>`;
+    + `<dt>Model</dt><dd><code>${esc(settingsData.model)}</code></dd>`
+    + ($("mainFirst").checked && Number($("slots").value) > 1 ? `<dt>Subagents</dt><dd><code>${esc(settingsData.subagent_model)}</code></dd>` : "");
   $("sumApi").textContent = (reach === "local" ? "This computer only" : reach === "all" ? "All networks" : host || "One address")
     + (key ? ", with key" : shared ? ", no key" : "");
-  $("sumModel").textContent = `${$("kvCache").value === "fp8" ? "FP8" : "NVFP4"} KV, ${$("draftTokens").value} draft tokens` + ($("slots").value > 1 ? `, ${$("slots").value} slots` : "")
+  const several = Number($("slots").value) > 1;
+  $("mainFirst").disabled = !several;
+  const model = store.state && store.state.model;
+  const now = model && model.subagent_context && $("mainFirst").checked && several;
+  $("mainFirstNow").hidden = !now;
+  $("mainFirstNow").textContent = now ? `Now: ${nf0.format(model.context)} tokens for the main session, ${nf0.format(model.subagent_context)} for subagents.`
+    + (model.subagent_fits ? "" : " While the main session uses most of its context, subagents wait.") : "";
+  $("sumModel").textContent = `${$("kvCache").value === "fp8" ? "FP8" : "NVFP4"} KV, ${$("draftTokens").value} draft tokens` + (several ? `, ${$("slots").value} slots` : "")
+    + (several && $("mainFirst").checked ? ", main session first" : "")
     + ($("vision").checked ? ", vision" : "") + ($("ramCache").value > 0 ? `, ${$("ramCache").value} GiB RAM` : "")
     + ($("autostart").checked ? ", starts with the app" : "");
   $("sumApp").textContent = radio("closeAction") === "keep" ? "Closing keeps the model" : "Closing stops the model";
@@ -1275,6 +1293,7 @@ function fillSettings(data) {
   [$("slots").min, $("slots").max] = data.limits.slots;
   for (const id of ["apiPort", "stationPort"]) [$(id).min, $(id).max] = data.limits.port;
   $("fitContext").checked = v.fit_context;
+  $("mainFirst").checked = v.main_first;
   $("vision").checked = v.vision;
   $("autostart").checked = v.autostart;
   $("agentRows").innerHTML = data.agents.map((agent) => {
@@ -1305,6 +1324,7 @@ async function saveSettings() {
   const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens"), slots: whole("slots"), ram_cache_gib: whole("ramCache") };
   for (const [key, value] of Object.entries(numbers)) if (value === null) { settingsError(key, "Enter a whole number."); return; }
   const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked, kv_cache: $("kvCache").value, vision: $("vision").checked,
+    main_first: $("mainFirst").checked,
     autostart: $("autostart").checked, agents: chosenAgents(), close_action: radio("closeAction"),
     extra_args: $("extraArgs").value, extra_env: $("extraEnv").value };
   let result;

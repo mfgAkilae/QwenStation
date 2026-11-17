@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__, installer, metrics
-from .config import (AGENT_IDS, MODEL_ID, model_subtitle, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
+from .config import (AGENT_IDS, MODEL_ID, SUBAGENT_MODEL_ID, model_subtitle, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
                      resource_path)
 from . import clients, settings
 from .config import save_settings, settings_path
@@ -39,6 +39,10 @@ MAX_BODY = 64 * 1024
 class Station:
     def __init__(self, config: Config, supervisor: Supervisor | None = None) -> None:
         self.config = config
+        if config.agents_unset and config.register_clients and not config.mock:
+            # No agent is switched on until the user chooses one, so a first start changes no agent config. An
+            # update from 2.0.0 or older, where all were on, keeps updating the agents that already have the model.
+            config.agents = clients.entered_agents()
         self.token = secrets.token_urlsafe(24)
         self.supervisor = supervisor or Supervisor(config)
         self.setup = make_setup(config, self.supervisor.log)
@@ -153,7 +157,11 @@ class Station:
                       "kv_cache": self.config.kv_cache,
                       "ram_cache_gib": self.config.ram_cache_gib,
                       "context": snapshot["context"],
-                      "max_seqs": self.config.slots},
+                      "max_seqs": self.config.slots,
+                      # Main session first: the subagent model's context, and whether it fits beside a full main session
+                      "subagent_id": SUBAGENT_MODEL_ID,
+                      "subagent_context": snapshot["subagent_context"],
+                      "subagent_fits": snapshot["subagent_fits"]},
             # The key itself never leaves the app again once it is saved; a hint tells that one is set.
             "api": {"base_url": self.config.api_base_url, "network_url": settings.network_url(self.config),
                     "host": self.config.bind_host, "key_hint": settings.key_hint(self.config.api_key),
@@ -192,7 +200,7 @@ class Station:
         return {"values": saved, "key_hint": settings.key_hint(key), "pending": pending, "after_restart": after_restart,
                 "addresses": settings.local_addresses(), "primary": settings.primary_address(),
                 "running": self._model_busy(), "platform": self.setup.platform, "mode": self.config.mode,
-                "model": MODEL_ID,
+                "model": MODEL_ID, "subagent_model": SUBAGENT_MODEL_ID,
                 "agents": [{"id": agent, "label": clients.AGENTS[agent]} for agent in clients.AGENT_IDS],
                 "clients": self.supervisor.clients,
                 "file": "" if self.config.mock else str(self.settings_file),
@@ -623,7 +631,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-register-clients", action="store_false", dest="register_clients", default=None,
                         help="Leave the configs of all coding agents alone (for experiments)")
     parser.add_argument("--agents", type=lambda text: [part for part in text.split(",") if part],
-                        help="Coding agents to enter the model in, comma-separated: " + ",".join(AGENT_IDS))
+                        help="Coding agents to enter the model in, comma-separated: " + ",".join(AGENT_IDS)
+                        + ". Default: the choice in the settings, none at first")
     parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
                         help="Do not shrink the context automatically when VRAM is short")
     parser.add_argument("--ram-cache-gib", type=int, dest="ram_cache_gib",
@@ -632,6 +641,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="How the KV cache stores keys and values: nvfp4 (default, more context) or fp8")
     parser.add_argument("--slots", type=int, dest="slots",
                         help="Requests the server works on at the same time (default 1); they share the context")
+    parser.add_argument("--main-first", action="store_true", dest="main_first", default=None,
+                        help="With several slots: the main session always has room for the full context, subagents "
+                             "(model " + SUBAGENT_MODEL_ID + ") get what is left and yield to it")
     parser.add_argument("--vision", action="store_true", default=None,
                         help="Load the image encoder, so requests may contain images (costs VRAM, so context)")
     parser.add_argument("--draft-tokens", type=int, dest="draft_tokens",
@@ -672,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {key: getattr(args, key) for key in
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
-                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "ram_cache_gib", "kv_cache",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "main_first", "ram_cache_gib", "kv_cache",
                       "register_clients", "agents")}
         config = load_config(args.config, overrides)
         if config.mock:

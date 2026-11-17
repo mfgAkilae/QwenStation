@@ -56,6 +56,87 @@ def store(groups, reconsider_final_swa_tail=False):
 '''
 
 
+# The places of vLLM 0.32 that patch-vllm-main-first.py anchors on, with just enough around them to run.
+STAND_IN_SCHED = '''import enum
+
+
+class SchedulingPolicy(enum.Enum):
+    FCFS = "fcfs"
+    PRIORITY = "priority"
+
+
+class PauseState(enum.Enum):
+    UNPAUSED = 0
+    PAUSED_ALL = 1
+
+
+class Request:
+    def __init__(self, request_id, priority, arrival_time):
+        self.request_id, self.priority, self.arrival_time = request_id, priority, arrival_time
+
+    def __lt__(self, other):
+        return (self.priority, self.arrival_time) < (other.priority, other.arrival_time)
+
+
+class Queue(list):
+    def peek_request(self):
+        return min(self)
+
+
+class Scheduler:
+    def __init__(self, running, waiting, slots, policy=SchedulingPolicy.PRIORITY):
+        self.running, self.waiting = list(running), Queue(waiting)
+        self.max_num_active_reqs, self.policy = slots, policy
+        self.num_waiting_for_streaming_input = 0
+        self._pause_state = PauseState.UNPAUSED
+        self.requires_kv_delivery = False
+        self.deferred_frees = []  # blocks on their way back to the pool
+        self.preempted = []
+
+    def schedule(self, fits=True):
+        preempted_reqs = []
+        scheduled_timestamp = 1.0
+        # First, schedule the RUNNING requests.
+        req_index = 0
+        if not preempted_reqs:
+            for request in sorted(self.waiting):
+                new_blocks = None if not fits else [1]
+                if new_blocks is None:
+                    # The request cannot be scheduled.
+
+                    break
+        return preempted_reqs
+
+    def _request_blocks_can_be_freed(self, request):
+        return True
+
+    def _preempt_request(
+        self, request, timestamp, drop_stale_output=False
+    ):
+        self.preempted.append(request.request_id)
+        self.waiting.append(request)
+'''
+STAND_IN_SERVING = '''class GenerateBaseServing:
+    @staticmethod
+    def _get_priority(request, raw_request):
+        if raw_request is not None:
+            try:
+                return int(raw_request)
+            except ValueError:
+                    pass
+        return request.priority
+'''
+STAND_IN_PROTOCOL = '''class Request:
+    def __init__(self, model):
+        self.model = model
+
+    def build_tok_params(self, model_config):
+        return dict(
+            max_total_tokens=model_config.max_model_len,
+        )
+'''
+
+
 class FakeSetup(setup.Setup):
     """Setup without WSL: the streamed commands are recorded and answered from a script."""
 
@@ -315,7 +396,8 @@ class BundleTests(unittest.TestCase):
         patches = sorted((ENGINE / "patches").glob("*.py"))
         self.assertEqual([patch.name for patch in patches],
                          ["patch-vllm-autotune-seed.py", "patch-vllm-dflash-quant.py", "patch-vllm-eagle-group.py",
-                          "patch-vllm-fp8-group-size.py", "patch-vllm-offload-draft-window.py",
+                          "patch-vllm-fp8-group-size.py", "patch-vllm-main-first.py",
+                          "patch-vllm-offload-draft-window.py",
                           "patch-vllm-swblock-divisor.py"])
         for patch in patches:
             compile(patch.read_text(encoding="utf-8"), str(patch), "exec")
@@ -362,6 +444,94 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(load("dflash"), (set(), [[True], None]))
         # Any other method keeps vLLM's behaviour.
         self.assertEqual(load("eagle3"), ({8}, [[True], [True]]))
+
+    def test_the_main_first_patch_lets_the_main_session_go_first(self):
+        """The patch for "main session first", run against stand-ins for the five files of vLLM it changes."""
+        import subprocess
+        import types
+
+        patch = ENGINE / "patches" / "patch-vllm-main-first.py"
+        files = {"v1/core/sched/scheduler.py": STAND_IN_SCHED,
+                 "entrypoints/generate/base/serving.py": STAND_IN_SERVING,
+                 "entrypoints/openai/chat_completion/protocol.py": STAND_IN_PROTOCOL,
+                 "entrypoints/openai/completion/protocol.py": STAND_IN_PROTOCOL,
+                 "entrypoints/openai/responses/protocol.py": STAND_IN_PROTOCOL}
+        with tempfile.TemporaryDirectory() as prefix:
+            vllm = Path(prefix, "lib", "python3.12", "site-packages", "vllm")
+
+            def run():
+                done = subprocess.run([sys.executable, str(patch)], env={**os.environ, "VLLM_PREFIX": prefix},
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return [line.split()[0].rstrip(":") for line in done.stdout.splitlines()]
+
+            self.assertEqual(run(), ["PATCH_NOT_APPLICABLE"])  # no vLLM at all
+            for name, text in files.items():
+                (vllm / name).parent.mkdir(parents=True, exist_ok=True)
+                (vllm / name).write_text("# another version\n", encoding="utf-8")
+            self.assertEqual(run(), ["PATCH_NOT_APPLICABLE"] * 5)  # code that moved on stays as it is
+            for name, text in files.items():
+                (vllm / name).write_text(text, encoding="utf-8")
+            self.assertEqual(run(), ["PATCH_APPLIED"] * 5)
+            patched = {name: (vllm / name).read_text(encoding="utf-8") for name in files}
+            self.assertEqual(run(), ["PATCH_ALREADY_APPLIED"] * 5)
+            for name, text in files.items():
+                self.assertEqual((vllm / name).read_text(encoding="utf-8"), patched[name])
+                self.assertEqual(Path(str(vllm / name) + ".pre-main-first.bak").read_text(encoding="utf-8"), text)
+
+        def module(name):
+            loaded = types.ModuleType(name.replace("/", "."))
+            exec(compile(patched[name], name, "exec"), loaded.__dict__)
+            return loaded
+
+        sched = module("v1/core/sched/scheduler.py")
+        main = lambda: sched.Request("main", 0, 3.0)  # noqa: E731
+        sub_a, sub_b = sched.Request("a", 1, 1.0), sched.Request("b", 1, 2.0)
+        # Both slots taken by subagents: the main request takes the one of the subagent that came last.
+        scheduler = sched.Scheduler([sub_a, sub_b], [main()], slots=2)
+        self.assertEqual(scheduler.schedule(), [sub_b])
+        self.assertEqual((scheduler.running, scheduler.preempted), ([sub_a], ["b"]))
+        # A free slot and room for the blocks: nobody is pushed out.
+        scheduler = sched.Scheduler([sub_a], [main()], slots=2)
+        self.assertEqual(scheduler.schedule(), [])
+        # A free slot but no room: the step after the failed attempt pushes one subagent out.
+        scheduler = sched.Scheduler([sub_a, sub_b], [main()], slots=4)
+        self.assertEqual(scheduler.schedule(fits=False), [])
+        self.assertEqual(scheduler.schedule(fits=False), [sub_b])
+        self.assertEqual(scheduler.schedule(fits=False), [])  # it tries again before the next one goes
+        self.assertEqual(scheduler.schedule(fits=False), [sub_a])
+        # Blocks of a request pushed out before still on their way back: wait for them first.
+        scheduler = sched.Scheduler([sub_a, sub_b], [main()], slots=4)
+        scheduler.deferred_frees.append((1, []))
+        self.assertEqual([scheduler.schedule(fits=False) for _ in range(3)], [[], [], []])
+        scheduler.deferred_frees.clear()
+        self.assertEqual(scheduler.schedule(fits=False), [sub_b])
+        # A waiting subagent never pushes anyone out, and neither does first come, first served.
+        self.assertEqual(sched.Scheduler([sub_a], [sched.Request("c", 1, 4.0)], slots=1).schedule(), [])
+        self.assertEqual(sched.Scheduler([sub_a], [main()], slots=1,
+                                         policy=sched.SchedulingPolicy.FCFS).schedule(), [])
+        # Within a step the main session is served first.
+        scheduler = sched.Scheduler([sub_a, sched.Request("main", 0, 3.0)], [], slots=2)
+        scheduler.schedule()
+        self.assertEqual([request.request_id for request in scheduler.running], ["main", "a"])
+
+        serving = module("entrypoints/generate/base/serving.py").GenerateBaseServing
+        protocol = module("entrypoints/openai/chat_completion/protocol.py")
+        config = types.SimpleNamespace(max_model_len=262144)
+
+        def ask(model):
+            request = types.SimpleNamespace(model=model, priority=0)
+            return (serving._get_priority(request, None),
+                    protocol.Request(model).build_tok_params(config)["max_total_tokens"])
+
+        names = {"VLLM_QWEN38_SUBAGENT_MODEL": "m-subagent", "VLLM_QWEN38_SUBAGENT_CONTEXT": "65536"}
+        with mock.patch.dict(os.environ, names):
+            self.assertEqual(ask("m"), (0, 262144))
+            self.assertEqual(ask("m-subagent"), (1, 65536))
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for key in names:
+                os.environ.pop(key, None)
+            self.assertEqual(ask("m-subagent"), (0, 262144))  # the setting off: the same model under two names
 
     def test_engine_pins_are_complete(self):
         pins = dict(line.split("=", 1) for line in (ENGINE / "engine.env").read_text(encoding="utf-8").splitlines()

@@ -592,6 +592,60 @@ class NvfpTests(TempData):
                          "Qwen3.8 27B - NVFP4 KV - DFlash2 - 262K (RTX 5090)")
 
 
+class MainFirstTests(TempData):
+    """Main session first: the main session keeps the full context, subagents get the room left beside it."""
+
+    preflight = NvfpTests.preflight
+
+    def test_it_is_a_model_setting_and_off_by_default(self):
+        self.assertFalse(Config().main_first)
+        self.assertIn("main_first", settings.MODEL_KEYS)
+        station = self.station(slots=2)
+        station.supervisor.state = "ready"
+        self.assertEqual(station.save_settings({"main_first": True})["pending"], ["main_first"])
+        self.assertEqual(settings.validate(Config(), settings.values(Config()), {"main_first": "yes"}, [])[2],
+                         "main_first")
+
+    def test_subagents_get_the_room_beside_a_main_session_of_the_full_context(self):
+        # A card that runs nothing else: 9.95 GiB of pool, of it 6.3 for the main session.
+        free = self.preflight(31.95, slots=2, main_first=True)
+        self.assertEqual(free["context"], 262144)
+        self.assertTrue(110000 < free["subagent_context"] < 120000, free["subagent_context"])
+        self.assertEqual(free["subagent_context"] % 1024, 0)
+        self.assertTrue(free["subagent_fits"])
+        # A desktop on the same card, 28.6 GiB free: the main session alone fills the pool. Subagents still get
+        # the smallest useful context and wait while the main session needs the room.
+        busy = self.preflight(28.6, slots=2, main_first=True)
+        self.assertEqual((busy["context"], busy["subagent_context"], busy["subagent_fits"]), (262144, 65536, False))
+        # Never more than the main session has.
+        self.assertEqual(supervisor_module.subagent_context(80 * 2 ** 30, 131072, kv_cache="nvfp4")[0], 131072)
+
+    def test_it_needs_two_slots(self):
+        self.assertNotIn("subagent_context", self.preflight(31.95, slots=1, main_first=True))
+        self.assertNotIn("subagent_context", self.preflight(31.95, slots=2))
+
+    def test_the_pool_takes_the_room_also_with_the_automatic_off(self):
+        on = self.preflight(30.3, slots=2, main_first=True, fit_context=False)
+        self.assertEqual(on["context"], 262144)
+        self.assertEqual(on["kv_bytes"], int((30.3 - supervisor_module.FIT_RESERVE_GIB) * 2 ** 30))
+        off = self.preflight(30.3, slots=2, fit_context=False)
+        self.assertEqual(off["kv_bytes"], supervisor_module.kv_pool_bytes(262144, kv_cache="nvfp4"))
+        # Too little free for the preset: nothing changes, the usual warning applies.
+        tight = self.preflight(27.0, slots=2, main_first=True, fit_context=False)
+        self.assertEqual(tight["kv_bytes"], supervisor_module.kv_pool_bytes(262144, kv_cache="nvfp4"))
+
+    def test_the_start_script_and_the_dashboard_get_the_subagent_context(self):
+        preset = self.preflight(31.95, slots=2, main_first=True)
+        command = ManagedLauncher(Config(mode="managed", slots=2, main_first=True)).command(preset)
+        self.assertIn(f"SUBAGENT_CTX={preset['subagent_context']}", command)
+        self.assertFalse([part for part in ManagedLauncher(Config(mode="managed")).command(PRESETS["262k"])
+                          if part.startswith("SUBAGENT_CTX")])
+        station = self.station(slots=2, main_first=True)
+        model = station.state_json()["model"]
+        self.assertEqual((model["subagent_id"], model["subagent_context"]), (config_module.SUBAGENT_MODEL_ID, 65536))
+        self.assertIsNone(self.station(slots=2).state_json()["model"]["subagent_context"])
+
+
 class RamCacheTests(TempData):
     """Sessions in RAM: what leaves the KV pool on the GPU is kept in RAM and copied back."""
 
@@ -632,9 +686,51 @@ class RamCacheTests(TempData):
 class AgentSettingTests(TempData):
     """Which coding agents get the model: chosen in the settings, applied at once."""
 
-    def test_by_default_every_agent_is_chosen(self):
-        self.assertEqual(Config().agents, list(config_module.AGENT_IDS))
-        self.assertEqual(settings.values(Config())["agents"], list(config_module.AGENT_IDS))
+    def test_by_default_no_agent_is_chosen(self):
+        self.assertEqual(Config().agents, [])
+        self.assertEqual(settings.values(Config())["agents"], [])
+
+    def agent_homes(self) -> list[Path]:
+        """A computer with all five agents, in the temp folder. Returns their folders."""
+        patcher = mock.patch.dict(os.environ, {"USERPROFILE": str(self.home), "HOME": str(self.home),
+                                               "APPDATA": str(self.home / "Roaming"),
+                                               "DSH_HOME": str(self.home / ".dsh")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        folders = [self.home / name for name in (".config/opencode", ".pi/agent", ".t3", ".dsh/profiles/desktop",
+                                                 "Roaming/Code/User", "Code/User")]
+        for folder in folders:
+            folder.mkdir(parents=True, exist_ok=True)
+        return [*folders, self.home / ".dsh"]
+
+    def started(self, values: dict, overrides: dict | None = None) -> Config:
+        """Load the settings and build the app as a start of the installed app does."""
+        path = self.home / "qwen-station-test.json"
+        path.write_text(json.dumps({"mode": "managed", **values}), encoding="utf-8")
+        config = load_config(str(path), {"autostart": False, "open_window": False, **(overrides or {})})
+        Station(config, Supervisor(config, MockLauncher(config)))
+        return config
+
+    def test_a_first_start_changes_no_agent_config(self):
+        folders = self.agent_homes()
+        config = self.started({"slots": 2})
+        self.assertTrue(config.agents_unset and config.register_clients)
+        self.assertEqual(config.agents, [])
+        supervisor = Supervisor(config, MockLauncher(config))
+        supervisor.refresh_clients(write=True)  # what every start of the model does
+        self.assertEqual({entry["status"] for entry in supervisor.clients.values()}, {"off"})
+        self.assertEqual([path for folder in folders for path in folder.rglob("*") if path.is_file()], [])
+
+    def test_an_update_keeps_the_agents_that_already_have_the_model(self):
+        self.agent_homes()
+        (self.home / ".dsh" / "profiles" / "desktop" / "cordis.patch.yml").write_text("", encoding="utf-8")
+        # What 2.0.0 left behind, where every agent was on: here OpenCode and DeepSeek Harness had the model.
+        clients.register_all("http://127.0.0.1:8000/v1", 262144, 1, agents=["opencode", "deepseek"])
+        self.assertEqual(self.started({}).agents, ["t3code", "opencode", "deepseek"])  # T3 Code through OpenCode
+        chosen = self.started({"agents": ["pi"]})
+        self.assertEqual((chosen.agents, chosen.agents_unset), (["pi"], False))
+        self.assertEqual(self.started({}, {"agents": []}).agents, [])  # --agents on the command line
+        self.assertEqual(self.started({"register_clients": False}).agents, [])  # the old switch, off
 
     def test_only_known_agents_once_each(self):
         config = Config()

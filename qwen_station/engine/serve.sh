@@ -8,6 +8,8 @@
 #   TARGET_NAME, TARGET_QUANT     another target below models/ (default: the Gittensor NVFP4 build, modelopt)
 #   EFFORT                        default reasoning_effort (low | medium | xhigh)
 #   KV_OFFLOAD_GIB                sessions pushed out of the GPU are kept in this much RAM (0 or unset: off)
+#   SUBAGENT_CTX                  main session first: requests for the subagent model yield to the main session and
+#                                 get this context (0 or unset: off, the subagent name is then the same model)
 #   EXTRA_ARGS                    appended to `vllm serve`; later arguments win
 #   XQA_DECODE, SPEC_MODE, SPEC_TOKENS, DRAFTER_NAME, KV_GROUP_SIZE, AUTOTUNE_PIN   switches for experiments, see below
 #
@@ -120,6 +122,17 @@ if [ "$OFFLOAD_GIB" != 0 ]; then
 fi
 [ -n "$SPEC_JSON" ] && SPEC_ARGS=(--speculative-config "$SPEC_JSON")
 
+# The model answers to a second name for subagents; it costs nothing, both names are the one loaded model.
+# Main session first (patch-vllm-main-first.py): requests for that name get the lower priority, and a main request
+# that finds no room takes it from them, so the main session always has its full context.
+SERVED_NAMES=(qwen38-gittensor-dflash qwen38-gittensor-dflash-subagent)
+PRIORITY_ARGS=()
+if [ "${SUBAGENT_CTX:-0}" != 0 ]; then
+  PRIORITY_ARGS=(--scheduling-policy priority)
+  export VLLM_QWEN38_SUBAGENT_MODEL="${SERVED_NAMES[1]}" VLLM_QWEN38_SUBAGENT_CONTEXT="$SUBAGENT_CTX"
+  log "--- Main session first: ${SERVED_NAMES[1]} gets up to $SUBAGENT_CTX tokens and yields to the main session"
+fi
+
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -160,9 +173,9 @@ echo running > "$STATUS"
 
 # shellcheck disable=SC2086
 "$VENV/bin/vllm" serve "$MODELS/$TARGET_NAME" \
-  --host "${VLLM_HOST:-127.0.0.1}" --port "${VLLM_PORT:-8000}" --served-model-name qwen38-gittensor-dflash \
+  --host "${VLLM_HOST:-127.0.0.1}" --port "${VLLM_PORT:-8000}" --served-model-name "${SERVED_NAMES[@]}" \
   --quantization "$TARGET_QUANT" --linear-backend auto "${KV_ARGS[@]}" \
-  "${SPEC_ARGS[@]}" "${OFFLOAD_ARGS[@]}" \
+  "${SPEC_ARGS[@]}" "${OFFLOAD_ARGS[@]}" "${PRIORITY_ARGS[@]}" \
   --max-model-len "${CTX:-262144}" --gpu-memory-utilization "${GPU_UTIL:-0.92}" \
   --max-num-seqs "$MAX_SEQS" --max-num-batched-tokens "$PREFILL_BATCH" --long-prefill-token-threshold "$PREFILL_BATCH" \
   --enable-prefix-caching --enable-prompt-tokens-details --cudagraph-capture-sizes 1 2 4 8 16 32 64 128 \

@@ -35,6 +35,9 @@ VISION_IMAGES = 4
 # Requests the server works on at the same time. They share one KV pool: a slot reserves nothing, a running
 # request takes its own state (about 1.5 GiB) plus its text. Tested with up to 4.
 MAX_SLOTS = 4
+# Sessions in RAM (GiB): what leaves the KV pool on the GPU is kept there and copied back. About 3.5 GiB per
+# 100K tokens (measured: 4.03 GB copied back for 117,008 tokens).
+MAX_RAM_CACHE_GIB = 128
 LOCAL_HOST = "127.0.0.1"  # the API answers this machine only
 ANY_HOST = "0.0.0.0"      # the API listens on every network interface
 API_KEY_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{8,128}")  # what fits into an Authorization header as it is
@@ -96,6 +99,7 @@ class Config:
     draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
     vision: bool = False  # load the image encoder: requests may contain images, at the cost of some VRAM
     slots: int = 1  # requests the server works on at the same time; they share the context
+    ram_cache_gib: int = 0  # sessions pushed out of the GPU are kept in this much RAM; 0: off
     extra_args: str = ""  # appended to the `vllm serve` command line, for experiments
     vllm_prefix: str = ""  # venv to run, e.g. /opt/vllm-0.32.0; empty: the start script's default
     model_base: str = ""  # WSL folder holding target and drafter; empty: the Windows folder via /mnt
@@ -140,6 +144,8 @@ class Config:
             raise ValueError(f"draft_tokens must be a number from 1 to {MAX_DRAFT_TOKENS}")
         if isinstance(self.slots, bool) or not 1 <= self.slots <= MAX_SLOTS:
             raise ValueError(f"slots must be a number from 1 to {MAX_SLOTS}")
+        if isinstance(self.ram_cache_gib, bool) or not 0 <= self.ram_cache_gib <= MAX_RAM_CACHE_GIB:
+            raise ValueError(f"ram_cache_gib must be a number from 0 to {MAX_RAM_CACHE_GIB}")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
         if self.api_host:
@@ -223,6 +229,7 @@ _FILE_KEYS = {
     "draft_tokens": int,
     "vision": bool,
     "slots": int,
+    "ram_cache_gib": int,
     "extra_args": str,
     "vllm_prefix": str,
     "model_base": str,

@@ -17,6 +17,44 @@ PROJECT = Path(__file__).resolve().parent.parent
 ENGINE = PROJECT / "qwen_station" / "engine"
 
 
+# The three places of vLLM 0.32's offloading scheduler that patch-vllm-offload-draft-window.py anchors on, with
+# just enough around them to run.
+STAND_IN_SCHEDULER = '''import logging
+from typing import NamedTuple
+
+logger = logging.getLogger(__name__)
+
+
+class GroupOffloadConfig(NamedTuple):
+    group_idx: int
+
+
+class SchedulerOffloadConfig:
+    @classmethod
+    def from_spec(cls, vllm_config, eagle_groups):
+        if eagle_groups:
+            logger.info(
+                "KV offloading: EAGLE/MTP draft attention groups %s "
+                "are volatile.",
+                sorted(eagle_groups),
+            )
+        return eagle_groups
+
+
+def store(groups, reconsider_final_swa_tail=False):
+    masks = []
+    for group_config in groups:
+        if groups:
+            if groups:
+                block_mask = [True]
+                prompt_horizon_block_mask: list[bool] | None = None
+                if reconsider_final_swa_tail:
+                    prompt_horizon_block_mask = [False]
+                masks.append(block_mask)
+    return masks
+'''
+
+
 class FakeSetup(setup.Setup):
     """Setup without WSL: the streamed commands are recorded and answered from a script."""
 
@@ -276,9 +314,53 @@ class BundleTests(unittest.TestCase):
         patches = sorted((ENGINE / "patches").glob("*.py"))
         self.assertEqual([patch.name for patch in patches],
                          ["patch-vllm-autotune-seed.py", "patch-vllm-dflash-quant.py", "patch-vllm-eagle-group.py",
-                          "patch-vllm-fp8-group-size.py", "patch-vllm-swblock-divisor.py"])
+                          "patch-vllm-fp8-group-size.py", "patch-vllm-offload-draft-window.py",
+                          "patch-vllm-swblock-divisor.py"])
         for patch in patches:
             compile(patch.read_text(encoding="utf-8"), str(patch), "exec")
+
+    def test_the_offloading_patch_makes_the_draft_group_a_window_group(self):
+        """The patch for sessions in RAM, run against a stand-in for vLLM's offloading scheduler."""
+        import subprocess
+        import types
+
+        patch = ENGINE / "patches" / "patch-vllm-offload-draft-window.py"
+        with tempfile.TemporaryDirectory() as prefix:
+            folder = Path(prefix, "lib", "python3.12", "site-packages", "vllm", "distributed", "kv_transfer",
+                          "kv_connector", "v1", "offloading")
+            folder.mkdir(parents=True)
+            target = folder / "scheduler.py"
+
+            def run():
+                done = subprocess.run([sys.executable, str(patch)], env={**os.environ, "VLLM_PREFIX": prefix},
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return done.stdout.split()[0].rstrip(":")
+
+            self.assertEqual(run(), "PATCH_NOT_APPLICABLE")  # a vLLM without this file
+            target.write_text("# another version of the scheduler\n", encoding="utf-8")
+            self.assertEqual(run(), "PATCH_NOT_APPLICABLE")  # and one whose code moved on
+            self.assertEqual(target.read_text(encoding="utf-8"), "# another version of the scheduler\n")
+
+            target.write_text(STAND_IN_SCHEDULER, encoding="utf-8")
+            self.assertEqual(run(), "PATCH_APPLIED")
+            patched = target.read_text(encoding="utf-8")
+            self.assertEqual(run(), "PATCH_ALREADY_APPLIED")
+            self.assertEqual(target.read_text(encoding="utf-8"), patched)
+            self.assertEqual((folder / "scheduler.py.pre-offload-draft-window.bak").read_text(encoding="utf-8"),
+                             STAND_IN_SCHEDULER)
+
+        def load(method):
+            module = types.ModuleType("scheduler")
+            exec(compile(patched, "scheduler.py", "exec"), module.__dict__)
+            config = types.SimpleNamespace(speculative_config=types.SimpleNamespace(method=method))
+            groups = module.SchedulerOffloadConfig.from_spec(config, {8})
+            return groups, module.store([module.GroupOffloadConfig(6), module.GroupOffloadConfig(8)])
+
+        # DFlash: the draft group is no longer volatile, and it stores every chunk (no mask).
+        self.assertEqual(load("dflash"), (set(), [[True], None]))
+        # Any other method keeps vLLM's behaviour.
+        self.assertEqual(load("eagle3"), ({8}, [[True], [True]]))
 
     def test_engine_pins_are_complete(self):
         pins = dict(line.split("=", 1) for line in (ENGINE / "engine.env").read_text(encoding="utf-8").splitlines()

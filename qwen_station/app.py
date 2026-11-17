@@ -149,7 +149,8 @@ class Station:
                         "lan": self.config.lan,
                         "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "vision": self.config.vision,
-                      "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else ""),
+                      "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else "")
+                      + (f", {self.config.ram_cache_gib} GiB of RAM for sessions" if self.config.ram_cache_gib else ""),
                       "context": snapshot["context"],
                       "max_seqs": self.config.slots},
             # The key itself never leaves the app again once it is saved; a hint tells that one is set.
@@ -194,6 +195,7 @@ class Station:
                 "file": "" if self.config.mock else str(self.settings_file),
                 "limits": {"draft_tokens": [settings.DEFAULT_DRAFT_TOKENS, settings.MAX_DRAFT_TOKENS],
                            "slots": [1, settings.MAX_SLOTS],
+                           "ram_cache_gib": [0, settings.MAX_RAM_CACHE_GIB],
                            "port": [settings.MIN_PORT, 65535]}}
 
     def save_settings(self, changes: dict) -> dict:
@@ -612,6 +614,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Leave the OpenCode and Pi entries alone (for experiments)")
     parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
                         help="Do not shrink the context automatically when VRAM is short")
+    parser.add_argument("--ram-cache-gib", type=int, dest="ram_cache_gib",
+                        help="Keep sessions that leave the GPU in this much RAM, in GiB (default 0: off)")
     parser.add_argument("--slots", type=int, dest="slots",
                         help="Requests the server works on at the same time (default 1); they share the context")
     parser.add_argument("--vision", action="store_true", default=None,
@@ -654,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {key: getattr(args, key) for key in
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
-                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "ram_cache_gib",
                       "register_clients")}
         config = load_config(args.config, overrides)
         if config.mock:

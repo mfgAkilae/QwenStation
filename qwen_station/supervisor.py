@@ -218,6 +218,8 @@ class WslLauncher:
             env.append(f"MODEL_BASE={config.model_base}")
         if config.draft_tokens != DEFAULT_DRAFT_TOKENS:
             env.append(f"SPEC_TOKENS={config.draft_tokens}")
+        if config.ram_cache_gib:
+            env.append(f"KV_OFFLOAD_GIB={config.ram_cache_gib}")
         if config.vision:
             # vLLM keys its cache of compiled graphs without the multimodal settings, but with images on the
             # model is called with embeddings instead of token ids. A graph compiled in text-only mode then

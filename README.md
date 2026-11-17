@@ -5,7 +5,7 @@ what the model is doing. For Windows and for Linux.
 
 - **Model:** Qwen3.8 27B as NVFP4 (Gittensor build for the RTX 5090), FP8 KV cache, DFlash2 drafter for
   speculative decoding. It can read images too; that is an option, because it costs context.
-- **Engine:** vLLM 0.32.0 with five small patches and verified kernel tuning. On Windows it runs in its own
+- **Engine:** vLLM 0.32.0 with six small patches and verified kernel tuning. On Windows it runs in its own
   WSL distribution, on Linux in one folder of your user.
 - **API:** `http://127.0.0.1:8000/v1`, model `qwen38-gittensor-dflash`. For this computer only and without a
   key by default; the settings open it for other devices, on all network interfaces or on one address, and
@@ -186,6 +186,8 @@ The **Settings** button in the window opens them:
   anyone who can reach the address can use the model, so set one before you share the API.
 - **Vision:** switches the model's image encoder on, see [Vision](#vision).
 - **Requests at the same time:** 1 to 4 slots, see [Several requests at once](#several-requests-at-once).
+- **Sessions kept in RAM:** a large session that another one pushed out of the GPU comes back in a second
+  instead of being read again, see [Sessions in RAM](#sessions-in-ram).
 - The API port, draft tokens per round, the automatic context reduction, the start of the model with the app,
   what happens when the window closes, the registration in OpenCode and Pi, the port of the dashboard, and
   extra arguments and environment for experiments.
@@ -233,6 +235,8 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   engine folder on Linux). The earlier preset `parallel-96k` is now the setting `slots`.
 - `slots`: how many requests the server works on at the same time, 1 (default) to 4. See
   [Several requests at once](#several-requests-at-once).
+- `ram_cache_gib`: how many GiB of RAM hold sessions that left the GPU, 0 (default, off) to 128. See
+  [Sessions in RAM](#sessions-in-ram).
 - `close_action`: `stop` ends the model when the window closes, `keep` leaves it running until **Quit**.
 - `api_host`: `127.0.0.1` (default), `0.0.0.0` or one IPv4 address of this computer, as described above.
   The older switch `lan: true` still works and means `0.0.0.0`.
@@ -334,7 +338,8 @@ for every request that runs. Each running request needs about 1.6 GiB for its ow
 | 4 requests | about 78,000 |
 
 A single request may still use the whole context. If requests do not fit together, nothing fails: the later
-one waits until there is room, and reads its context again if that was pushed out of the cache.
+one waits until there is room, and reads its context again if that was pushed out of the cache
+([Sessions in RAM](#sessions-in-ram) takes that reading away).
 
 Measured on 2026-11-17 (decode tok/s; short prompts unless stated):
 
@@ -360,6 +365,44 @@ Requests that run together move at the pace of the longest context among them, s
 long session gets about half its usual speed. Answers can differ in single words from the ones the same request
 gets alone (in the tests one to two of four did): batches are computed slightly differently, as in vLLM without
 a drafter. More draft tokens per round and vision work with several slots.
+
+### Sessions in RAM
+
+The KV cache on the GPU has room for one large session. When two take turns, for example two agents with
+120,000 tokens each, each one pushes the other out, and at its next request the server reads the whole
+context again: 27 seconds for 119,000 tokens, every time.
+
+With **Sessions kept in RAM** (`ram_cache_gib`, `--ram-cache-gib`; off by default) the server copies what
+leaves the GPU to RAM and copies it back when the session returns. Measured on 2026-11-17 with 24 GiB:
+
+| Two sessions in turns | Without | With sessions in RAM |
+|---|---|---|
+| 119K tokens each: time to the first token | 26.5 s | 1.1 s |
+| The same: how much of the prompt comes from the cache | 0 percent | 98 percent |
+| The same: decode speed | 417 to 437 tok/s | 407 to 417 tok/s |
+| Two conversations of 109K tokens that grow turn by turn: time per switch | 23 s | 1.0 s |
+| 174K tokens each (context 196,608): time to the first token | 52 s | 1.8 s |
+
+The answers were the same as on the first visit, and each session found the code word hidden in its own
+document. About 1,900 tokens at the end of a session are read again after it comes back. It works together
+with several slots and more draft tokens: with 2 slots and 15 draft tokens, three sessions of 59K tokens in
+turns took 0.6 seconds per switch instead of 8.1, and two of 94K tokens 1.0 instead of 17 to 21.
+
+What it costs:
+
+- **RAM.** About 3.5 GiB per 100,000 tokens that are kept. The whole amount is taken when the model starts,
+  which makes the start about 15 seconds longer. When it is full, the oldest blocks go: a cache too small for
+  the sessions behaves like none (three sessions of 99K tokens with 4 GiB were read again each time, without
+  an error).
+- **On Windows the RAM comes out of WSL's share.** WSL gives Linux half of the PC's RAM unless
+  `%UserProfile%\.wslconfig` says otherwise (`memory=`), and the cache has to fit into half of that. On a PC
+  with 128 GB that allows about 30 GiB, with 64 GB about 15. If the amount does not fit, the model starts
+  without the cache and the log says so.
+- **Nothing on the GPU.** The context and the speed of a single session stay as they are.
+
+This is not a second context: one request still has the limit of the context, and two large sessions still do
+not run at the same moment (see above). It removes the wait when they take turns. It needs a patch to vLLM,
+which Qwen Station applies; [engine-notes.md](docs/engine-notes.md) has the details.
 
 ### Measure it yourself
 
@@ -406,7 +449,7 @@ file is an AppImage: the same Python package and a standalone Python 3.12, behin
 | `qwen_station/dashboard.html` | The dashboard: one file, no external resources |
 | `qwen_station/engine/provision.sh` | Installs the engine below one prefix. Idempotent, also runs on native Linux. |
 | `qwen_station/engine/serve.sh` | Starts `vllm serve` with the tested settings |
-| `qwen_station/engine/patches/` | Five idempotent patches for vLLM; each file explains its reason |
+| `qwen_station/engine/patches/` | Six idempotent patches for vLLM; each file explains its reason |
 | `qwen_station/engine/autotune/` | Verified FlashInfer kernel tuning |
 | `qwen_station/engine/engine.env` | Version pins: vLLM, Python, uv, CUDA packages, model revisions |
 
@@ -460,6 +503,13 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   context chosen at 29.1 GiB free (163,840), a session of 152K tokens (405 tok/s), 4 slots through the
   settings with four requests at once (1,385 to 1,405 tok/s together), and requests sent at the moment the
   app reports "Ready".
+- **Sessions in RAM (1.7.0)**, on Windows with the real model. In a development distribution: the patch
+  applied to an unchanged vLLM, two sessions of 119K tokens in turns, two conversations of 109K tokens that
+  grow turn by turn, 2 slots with 15 draft tokens (two sessions of 94K and three of 59K in turns, two short
+  requests at once beside them), a cache too small for the sessions, and a start that asks for more RAM than
+  there is. With the app from the checkout against the installed distribution: the engine update from 1.2.0
+  to 1.3.0 without a click, 24 GiB, two sessions of 119K tokens in turns (1.1 instead of 27 seconds) and two of
+  174K tokens with a context of 196,608 (1.8 instead of 52 seconds).
 - **The settings of 1.4.0**, on Windows with the release exe: the API on all interfaces through the settings
   and a restart of the model, the administrator prompt (declined once, by its timeout, and confirmed once), the
   firewall rule, the removal of a port forwarding of an older setup, requests from this PC, over its LAN and VPN
@@ -485,5 +535,6 @@ Not tested on a real machine: Linux on bare metal with the native NVIDIA driver;
 manager and the window on a Linux desktop (only the terminal mode ran); distributions other than Ubuntu (the
 bundled Python is built for glibc 2.17 and newer, the package manager commands for Fedora, Arch and openSUSE are
 untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a faked WSL only);
-Windows 10; more than 4 slots; slots in Linux mode with the real model; the full context of 262,144 tokens on
+Windows 10; more than 4 slots; slots in Linux mode with the real model; sessions in RAM in Linux mode, together
+with vision, over many hours, and with WSL's default memory limit (the test machine gives WSL more); the full context of 262,144 tokens on
 a card with nothing else on it (the test machine's desktop runs on the same card).

@@ -7,6 +7,7 @@
 #   VLLM_HOST, VLLM_PORT          bind address and port
 #   TARGET_NAME, TARGET_QUANT     another target below models/ (default: the Gittensor NVFP4 build, modelopt)
 #   EFFORT                        default reasoning_effort (low | medium | xhigh)
+#   KV_OFFLOAD_GIB                sessions pushed out of the GPU are kept in this much RAM (0 or unset: off)
 #   EXTRA_ARGS                    appended to `vllm serve`; later arguments win
 #   XQA_DECODE, SPEC_MODE, SPEC_TOKENS, DRAFTER_NAME, KV_GROUP_SIZE, AUTOTUNE_PIN   switches for experiments, see below
 #
@@ -98,6 +99,25 @@ case "${SPEC_MODE:-dflash}" in
   *)    SPEC_JSON='{"method":"'"${SPEC_MODE:-dflash}"'","model":"'"$MODELS/${DRAFTER_NAME:-$DRAFTER_DIR}"'","quantization":"'"${DRAFTER_QUANT:-compressed-tensors}"'","num_speculative_tokens":'"${SPEC_TOKENS:-7}${SPEC_EXTRA:-}"'}' ;;
 esac
 SPEC_ARGS=()
+
+# Sessions in RAM: KV blocks that leave the pool on the GPU are copied to RAM and copied back when their
+# session returns, about a second for 120K tokens instead of half a minute of reading
+# (patch-vllm-offload-draft-window.py makes that work with the drafter). The RAM is taken at the start, as a
+# file in /dev/shm, and vLLM asks for its own allocator next to our PYTORCH_CUDA_ALLOC_CONF.
+OFFLOAD_ARGS=()
+OFFLOAD_GIB="${KV_OFFLOAD_GIB:-0}"
+if [ "$OFFLOAD_GIB" != 0 ]; then
+  FREE_RAM=$(awk '/MemAvailable/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null)
+  FREE_SHM=$(df -BG --output=avail /dev/shm 2>/dev/null | tail -1 | tr -dc 0-9)
+  # The server itself needs RAM beside it (8 GiB kept), and the file has to fit into /dev/shm, which Linux
+  # limits to half of the RAM by default.
+  if [ $((OFFLOAD_GIB + 8)) -gt "${FREE_RAM:-0}" ] || [ $((OFFLOAD_GIB + 1)) -gt "${FREE_SHM:-0}" ]; then
+    log "WARNING: sessions in RAM are off for this start: $OFFLOAD_GIB GiB asked for, but ${FREE_RAM:-0} GiB of RAM are free here (8 GiB stay for the server) and /dev/shm has room for ${FREE_SHM:-0} GiB."
+  else
+    OFFLOAD_ARGS=(--kv-offloading-size "$OFFLOAD_GIB" --enable-cumem-allocator)
+    log "--- Sessions in RAM: $OFFLOAD_GIB GiB"
+  fi
+fi
 [ -n "$SPEC_JSON" ] && SPEC_ARGS=(--speculative-config "$SPEC_JSON")
 
 export HF_HUB_OFFLINE=1
@@ -142,7 +162,7 @@ echo running > "$STATUS"
 "$VENV/bin/vllm" serve "$MODELS/$TARGET_NAME" \
   --host "${VLLM_HOST:-127.0.0.1}" --port "${VLLM_PORT:-8000}" --served-model-name qwen38-gittensor-dflash \
   --quantization "$TARGET_QUANT" --linear-backend auto "${KV_ARGS[@]}" \
-  "${SPEC_ARGS[@]}" \
+  "${SPEC_ARGS[@]}" "${OFFLOAD_ARGS[@]}" \
   --max-model-len "${CTX:-262144}" --gpu-memory-utilization "${GPU_UTIL:-0.92}" \
   --max-num-seqs "$MAX_SEQS" --max-num-batched-tokens "$PREFILL_BATCH" --long-prefill-token-threshold "$PREFILL_BATCH" \
   --enable-prefix-caching --enable-prompt-tokens-details --cudagraph-capture-sizes 1 2 4 8 16 32 64 128 \

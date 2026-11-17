@@ -132,26 +132,42 @@ arguments last and the last one wins, so the engine needs no change. Two things 
 The DFlash2 drafter is text-only; vLLM says so at the start ("Embeddings from the target model will not be
 passed to the drafter") and falls back to drafting from the text alone. XQA stays the decode kernel.
 
-## Tried and dropped
+**Sessions in RAM, with a patch to vLLM's offloading** (`ram_cache_gib`, `KV_OFFLOAD_GIB`; off by default;
+measured 2026-11-17). The KV pool holds one large session. A second one pushes the first out of the GPU, and
+every switch between two sessions of 119K tokens then reads the prompt again: 27 seconds, 0 percent from the
+cache. vLLM's native CPU offloading (`--kv-offloading-size`) copies blocks that leave the pool to RAM and back.
 
-- **KV offloading to RAM** (`--kv-offloading-size`, vLLM's native CPU offloading; measured 2026-11-17). The aim:
-  two large sessions in turns without reading the one that was pushed out of the GPU again. Without it every
-  switch between two sessions of 119K tokens took 27 seconds (0 percent from the cache).
-  - It needs `--enable-cumem-allocator`: vLLM refuses a KV connector together with
-    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, which `serve.sh` sets. The RAM region is allocated at
-    the start, in `/dev/shm` (24 GiB asked for, 25.8 GB taken).
-  - Without the drafter it works. Two sessions of 149K tokens in turns: the second visit took 1.1 to 1.2
-    seconds instead of 40, with 99 percent of the prompt from the cache, 10 GB copied back in 0.35 seconds, the
-    right code word from the document and the same answer as before. Writing to RAM costs next to nothing
-    (8 GB in 0.3 seconds). But without the drafter the model decodes at 70 instead of 400 tok/s.
-  - With the DFlash2 drafter nothing comes back: the blocks are written (two chunks per block, a third one for
-    the last two blocks only), every later visit still reads the whole prompt, and `CPU_to_GPU` stays at 0.
-    vLLM treats the drafter's layers as a sliding-window group whose newest chunk is "volatile" and not stored,
-    while its lookup asks for the window (2,048 tokens, two blocks of 1,648) plus one more chunk in a row.
-    That reading of the code is a hypothesis; `blocks_per_chunk` 2, which should have made the window fit one
-    chunk, changed nothing. Decode with offloading on was 384 to 404 tok/s against 417 to 437 without.
-  - Not tried: a patch to vLLM's offloading scheduler, or leaving the drafter's group out of the offloading and
-    letting it rebuild its window.
+- It needs `--enable-cumem-allocator`: vLLM refuses a KV connector together with
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, which `serve.sh` sets. The RAM is taken at the start, as a
+  file in `/dev/shm` (24 GiB asked for, 25.8 GB taken, about 14 seconds longer to start). `serve.sh` leaves
+  the offloading off, with a warning in the log, when less than the asked size plus 8 GiB is free.
+- Without the drafter it works out of the box: two sessions of 149K tokens in turns, 1.1 to 1.2 seconds
+  instead of 40 for the second visit, 99 percent from the cache. But then the model decodes at 70 tok/s.
+- With the DFlash2 drafter, unpatched, nothing comes back: the blocks are written, every later visit still
+  reads the whole prompt, and `CPU_to_GPU` stays at 0. A lookup that printed its result per KV cache group
+  showed why. The model has nine groups here: six Mamba groups, two full-attention groups, and the drafter's
+  five layers as a sliding-window group (window 2,048 tokens, two chunks of 1,648).
+  1. `patch-vllm-eagle-group.py` flags the drafter's group as an "eagle group", and the offloading code treats
+     eagle groups as volatile: its lookup wants the window plus one more chunk in a row and stores next to
+     none of them. That group returned 0 hits, and one group with 0 makes the whole request a miss.
+  2. The Mamba groups hit only up to one chunk before the last full one, so the boundary a request is restored
+     at moves one chunk to the left. A sliding-window group stores only the chunks its window needs at the
+     last boundary, so the window for the boundary that is really used was missing.
+- `patch-vllm-offload-draft-window.py` changes both, for the method `dflash` only: for offloading the
+  drafter's group is a plain sliding-window group, and it stores every chunk as it is completed. The first
+  change alone was not enough. The drafter's KV of the newest chunk can be one speculation step stale when it
+  is stored; that can only lower how many draft tokens are kept right after a restore, because the model
+  verifies every draft.
+- With the patch: two sessions of 119K tokens in turns, 1.1 seconds to the first token instead of 26.5, with
+  117,008 of 118,928 tokens from RAM, the right code word from each document and the same answers as on the
+  first visit, 407 to 417 tok/s. Two conversations of 109K tokens that grow turn by turn, in turns: 1.0 second
+  per switch instead of 23, about 1,900 tokens read again each time. No preemptions, no errors. Two sessions
+  of 174K tokens with a context of 196,608: 1.8 seconds instead of 52. With 2 slots and 15 draft tokens, three
+  sessions of 59K tokens in turns: 0.6 seconds instead of 8.1. Copied back: 4.03 GB for 117,008 tokens.
+- `blocks_per_chunk` 2, which should have made the window fit into one chunk, changed nothing. Decode with
+  offloading on is within a few percent of the speed without (single runs: 372 to 417 against 417 to 437).
+
+## Tried and dropped
 
 - **B12X** (`b12x` 1.5.1, the version vLLM 0.32 pins; measured 2026-11-17 in rounds per second, which do not
   depend on the text: 65 with a short prompt, 62 behind 33K and 54.5 behind 137K tokens as the baseline).

@@ -525,6 +525,43 @@ class SlotTests(TempData):
         self.assertTrue(clients.model_name(229376, 4).endswith("229K (RTX 5090) - 4 slots"))
 
 
+class RamCacheTests(TempData):
+    """Sessions in RAM: what leaves the KV pool on the GPU is kept in RAM and copied back."""
+
+    def test_the_start_script_gets_the_size_and_nothing_else_changes(self):
+        def parts(config):
+            return ManagedLauncher(config).command(PRESETS["262k"])
+
+        off, on = parts(Config(mode="managed")), parts(Config(mode="managed", ram_cache_gib=24))
+        self.assertFalse([part for part in off if "KV_OFFLOAD_GIB" in part])
+        self.assertIn("KV_OFFLOAD_GIB=24", on)
+        # The RAM is beside the pool on the GPU, so the context and the pool stay as they are.
+        self.assertEqual(off, [part for part in on if not part.startswith("KV_OFFLOAD_GIB")])
+        self.assertIn("KV_OFFLOAD_GIB=24", NativeLauncher(Config(mode="native", prefix="/p", ram_cache_gib=24))
+                      .command(PRESETS["262k"]))
+
+    def test_the_start_script_turns_the_size_into_the_arguments_of_the_server(self):
+        script = (Path(config_module.__file__).parent / "engine" / "serve.sh").read_text(encoding="utf-8")
+        self.assertIn('OFFLOAD_ARGS=(--kv-offloading-size "$OFFLOAD_GIB" --enable-cumem-allocator)', script)
+        self.assertIn('"${SPEC_ARGS[@]}" "${OFFLOAD_ARGS[@]}"', script)
+
+    def test_the_size_has_limits_and_waits_for_the_restart(self):
+        config = Config()
+        for size in (-1, config_module.MAX_RAM_CACHE_GIB + 1, True, "24"):
+            self.assertEqual(settings.validate(config, settings.values(config), {"ram_cache_gib": size}, [])[2],
+                             "ram_cache_gib")
+        with self.assertRaises(ValueError):
+            Config(ram_cache_gib=-1).validate()
+        station = self.station()
+        station.supervisor.state = "ready"
+        self.assertEqual(station.settings_json()["limits"]["ram_cache_gib"], [0, config_module.MAX_RAM_CACHE_GIB])
+        self.assertEqual(station.save_settings({"ram_cache_gib": 24})["pending"], ["ram_cache_gib"])
+        self.assertNotIn("RAM", station.state_json()["model"]["subtitle"])
+        station.supervisor.before_start()
+        self.assertTrue(station.state_json()["model"]["subtitle"].endswith(", 24 GiB of RAM for sessions"))
+        self.assertEqual(load_config(str(station.settings_file)).ram_cache_gib, 24)
+
+
 class RelayTests(unittest.TestCase):
     """The relay passes connections from other devices on to the server behind 127.0.0.1."""
 

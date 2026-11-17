@@ -336,7 +336,8 @@ async function poll() {
   } catch (error) {
     store.failures += 1;
     if (store.failures >= 3) {
-      $("banner").textContent = "No connection to Qwen Station. The app is no longer running. Open Qwen-Station.exe to start it again.";
+      $("banner").textContent = "No connection to Qwen Station. The app is no longer running. "
+        + (store.state && store.state.station.platform === "linux" ? "Run qwen-station to start it again." : "Open Qwen-Station.exe to start it again.");
       $("banner").style.display = "block";
       setStatus("off", "off", "Disconnected", "");
     }
@@ -491,24 +492,25 @@ function renderNotice(s) {
       <div class="actions"><button class="btn primary" data-act="setup-restart">Restart now</button>
         <button class="btn" data-act="setup-check">Check again without restarting</button></div>`;
   } else if (setup.state === "needed") {
-    const update = setup.reason === "update";
+    const update = setup.reason === "update", linux = setup.platform === "linux";
     const blocked = (setup.checks || []).some((c) => c.blocking && !c.ok);
     const needs = (setup.checks || []).map((c) => { const kind = !c.ok ? "no" : c.warn ? "warn" : "ok";
       return `<li class="${kind}">${icon({ ok: "check", warn: "warn", no: "x" }[kind])}<span><b>${esc(c.label)}:</b> ${esc(c.detail)}</span></li>`; }).join("");
     html = `<h2>${update ? "Update the engine" : "Set up Qwen Station"}</h2>
       <p>${update ? "This version ships a newer engine. Existing parts stay. Only changed parts are downloaded."
+        : linux ? "The app sets up everything by itself in one folder: Python, vLLM and the model. Nothing is installed system-wide, except a compiler if your system has none."
         : "The app sets up everything by itself: its own Linux environment in WSL, vLLM and the model. It changes nothing on your existing system."}</p>
       <ul class="facts"><li><b>Download:</b> about 30 GB, 20 GB of it for the model</li>
-        <li><b>Disk space:</b> about 32 GB, at least ${setup.min_free_gb} GB free</li>
+        <li><b>Disk space:</b> about ${linux ? 28 : 32} GB, at least ${setup.min_free_gb} GB free</li>
         <li><b>Duration:</b> 8 to 60 minutes, depending on your connection. If interrupted, setup resumes from there later.</li></ul>
       <ul>${needs}</ul>
       <div class="field"><label for="setupLocation">Folder for the engine and the model</label>
         <input id="setupLocation" type="text" spellcheck="false" autocomplete="off" value="${esc(setup.location)}"${update ? " disabled" : ""}>
-        <small>A fast SSD works best. In WSL, the Linux environment is named “${esc(setup.distro)}”.</small></div>
+        <small>${linux ? "A fast SSD works best. The folder is created if it does not exist." : `A fast SSD works best. In WSL, the Linux environment is named “${esc(setup.distro)}”.`}</small></div>
       <p class="setup-error" id="setupStartError" role="alert" style="margin:12px 0 0" hidden></p>
       <div class="actions"><button class="btn primary" data-act="setup"${blocked ? " disabled" : ""}>${update ? "Update" : "Set up"}</button>
         ${blocked ? `<button class="btn" data-act="setup-check">Check again</button>` : ""}</div>`;
-  } else if (s.state === "preflight") html = `<h2>Checking requirements</h2><p>Installation, WSL, port and free VRAM.</p>`;
+  } else if (s.state === "preflight") html = `<h2>Checking requirements</h2><p>Installation, port and free VRAM.</p>`;
   else if (s.state === "stopping") html = `<h2>Stopping the model</h2><p>The server shuts down and frees the VRAM.</p>`;
   else if (s.state === "blocked" && error) {
     html = `<h2>${esc(error.title)}</h2><ul>${checks}</ul>`;

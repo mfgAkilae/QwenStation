@@ -40,8 +40,9 @@ log "=== $(date '+%F %T') Qwen Station Engine $ENGINE_VERSION, vLLM ${VLLM_VERSI
 [ -x "$VENV/bin/vllm" ] || { log "ERROR: vLLM is missing in $VENV. Run the setup again."; echo "exited 4" > "$STATUS"; exit 4; }
 [ -f "$MODELS/$TARGET_NAME/config.json" ] || { log "ERROR: The model is missing: $MODELS/$TARGET_NAME"; echo "exited 4" > "$STATUS"; exit 4; }
 
-# A server left over from an earlier run would hold the port and the VRAM.
-PATTERN='vllm serve [^ ]*/Qwen3\.8-27B'
+# A server left over from an earlier run of this installation would hold the port and the VRAM.
+# Only this installation's: other vLLM servers on the machine are left alone.
+PATTERN="vllm serve $(printf '%s' "$MODELS" | sed 's/[].[*^$]/\\&/g')/"
 if pgrep -f "$PATTERN" >/dev/null; then
   log "--- Stopping a leftover server"
   for pid in $(pgrep -f "$PATTERN"); do

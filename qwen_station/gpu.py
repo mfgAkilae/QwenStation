@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -113,11 +114,28 @@ ConvertTo-Json -Compress -InputObject @($out)
 """
 
 
+def _compute_apps(timeout: float) -> list[dict]:
+    """Linux: nvidia-smi knows the memory of every compute process."""
+    command = ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows = []
+    for line in result.stdout.splitlines() if result.returncode == 0 else []:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) == 3 and parts[0].isdigit() and _number(parts[2]):
+            rows.append({"pid": int(parts[0]), "name": parts[1].rsplit("/", 1)[-1], "mib": round(_number(parts[2]))})
+    return sorted(rows, key=lambda row: -row["mib"])
+
+
 def gpu_processes(timeout: float = 20.0, max_mib: float = 0.0) -> list[dict]:
     """Dedicated GPU memory per Windows process, all adapters. nvidia-smi cannot report this under WDDM.
 
     `max_mib` drops rows larger than a whole card: the counter reports nonsense for dwm and csrss.
     """
+    if os.name != "nt":
+        return _compute_apps(timeout)
     try:
         result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _PROCESS_QUERY],
                                 capture_output=True, text=True, timeout=timeout, creationflags=NO_WINDOW)

@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import secrets
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -23,7 +25,7 @@ from . import __version__, installer, metrics
 from .config import (MODEL_ID, MODEL_SUBTITLE, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
                      resource_path)
 from .gpu import GpuMonitor
-from .setup import Setup, uninstall_message
+from .setup import make_setup, uninstall_message
 from .supervisor import Supervisor, http_get
 
 LOG = logging.getLogger("qwen-station")
@@ -37,8 +39,11 @@ class Station:
         self.config = config
         self.token = secrets.token_urlsafe(24)
         self.supervisor = supervisor or Supervisor(config)
-        self.setup = Setup(config, self.supervisor.log)
+        self.setup = make_setup(config, self.supervisor.log)
         self.setup.on_done = self._start_or_idle
+        self.auto_setup = False  # --setup: start a needed setup without waiting for the click
+        self.setup_location = ""
+        self.console = False  # --console: print the log to the terminal
         self.gpu = GpuMonitor(config.gpu_match)
         self.tracker = metrics.Tracker()
         self.samples: deque[dict] = deque(maxlen=HISTORY)
@@ -129,7 +134,8 @@ class Station:
         return {
             "now": round(time.time(), 3),
             "station": {"version": __version__, "mock": self.config.mock, "close_action": self.config.close_action,
-                        "mode": self.config.mode, "root": self.config.root, "distro": self.config.distro,
+                        "mode": self.config.mode, "platform": self.setup.platform,
+                        "root": self.config.root, "distro": self.config.distro,
                         "lan": self.config.lan,
                         "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "subtitle": MODEL_SUBTITLE,
@@ -219,6 +225,11 @@ class Station:
             if self.setup.check() == "needed" and self.setup.reason == "app":
                 self.setup.install_app_only()
             self.setup.resume_after_restart()
+            # An update leaves nothing to decide (same folder, only changed parts), so it needs no click.
+            if self.setup.state == "needed" and (self.auto_setup or self.setup.reason == "update"):
+                error = self.setup.start(self.setup_location)
+                if error:
+                    self.supervisor.log.add(f"The setup could not start: {error}", "error")
             if self.setup.state in ("off", "done"):
                 self._start_or_idle()
         except Exception:
@@ -234,13 +245,35 @@ class Station:
         elif not self.config.mock:
             self.supervisor.refresh_clients(write=False)
 
+    def _console_loop(self) -> None:
+        """The log on the terminal, for machines without a desktop. Downloads report every 15 seconds."""
+        seq, reported, state = 0, 0.0, ""
+        while not self.quit_event.wait(1.0):
+            for line in self.supervisor.log.since(seq):
+                seq = line["seq"]
+                if not line.get("progress"):
+                    print(line["text"], flush=True)
+            setup = self.setup.snapshot()
+            active = next((step for step in setup["steps"] if step["status"] == "active" and step["progress"]), None)
+            if active and time.time() - reported >= 15:
+                reported = time.time()
+                done, total = active["progress"]
+                print(f"    {active['label']}: {done / 1e9:.1f} of {total / 1e9:.1f} GB", flush=True)
+            current = setup["state"] if setup["state"] not in ("off", "done") else self.supervisor.state
+            if current != state:
+                state = current
+                if state == "needed":
+                    print(f"Setup needed. Open {self.url} and click \"Set up\", or start again with --setup.", flush=True)
+
     def run(self) -> int:
         self.serve()
         self.start_background()
-        if self.config.mode == "managed" and not self.config.mock:
-            self.setup.state = "checking"  # shown until the look into the distribution is back
+        if self.config.mode in ("managed", "native") and not self.config.mock:
+            self.setup.state = "checking"  # shown until the look at the installation is back
         if self.config.open_window:
             self.open_window()
+        if self.console:
+            threading.Thread(target=self._console_loop, name="console", daemon=True).start()
         threading.Thread(target=self._boot, name="boot", daemon=True).start()
         try:
             while not self.quit_event.wait(1.0):
@@ -253,22 +286,36 @@ class Station:
         return 0
 
 
-def launch_window(url: str) -> tuple[subprocess.Popen | None, bool | None]:
-    """Open the dashboard as its own app window (Edge or Chrome), else in the default browser."""
+def has_display() -> bool:
+    return os.name == "nt" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _app_browsers() -> list[Path]:
+    """Browsers that can show a page as its own window (--app), best first."""
+    if os.name != "nt":
+        names = ("microsoft-edge", "microsoft-edge-stable", "google-chrome", "google-chrome-stable", "chromium",
+                 "chromium-browser", "brave-browser")
+        return [Path(found) for found in (shutil.which(name) for name in names) if found]
     roots = [os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")]
     relative = (r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe")
-    for tail in relative:
-        for root in roots:
-            executable = Path(root) / tail if root else None
-            if executable and executable.is_file():
-                profile = data_dir() / "window-profile"
-                arguments = [str(executable), f"--app={url}", f"--user-data-dir={profile}", "--no-first-run",
-                             "--no-default-browser-check", "--window-size=1340,920"]
-                try:
-                    return subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL), None
-                except OSError:
-                    LOG.exception("could not start %s", executable)
+    return [Path(root) / tail for tail in relative for root in roots if root]
+
+
+def launch_window(url: str) -> tuple[subprocess.Popen | None, bool | None]:
+    """Open the dashboard as its own app window (Edge or Chrome), else in the default browser."""
+    if not has_display():
+        return None, False
+    for executable in _app_browsers():
+        if not executable.is_file():
+            continue
+        profile = data_dir() / "window-profile"
+        arguments = [str(executable), f"--app={url}", f"--user-data-dir={profile}", "--no-first-run",
+                     "--no-default-browser-check", "--window-size=1340,920"]
+        try:
+            return subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL), None
+        except OSError:
+            LOG.exception("could not start %s", executable)
     webbrowser.open(url)
     return None, False
 
@@ -407,8 +454,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _message_box(text: str, title: str = "Qwen Station", icon: int = 0x10) -> None:
-    if sys.stdout is not None and sys.stdout.isatty():
-        print(text)
+    if os.name != "nt" or (sys.stdout is not None and sys.stdout.isatty()):
+        print(text, file=sys.stdout if icon == 0x40 and sys.stdout is not None else sys.stderr)
         return
     try:
         import ctypes
@@ -454,7 +501,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--extra-env", dest="extra_env", help="KEY=VALUE pairs for the start scripts")
     parser.add_argument("--check", action="store_true", help="Check the requirements and client entries, then exit")
     parser.add_argument("--uninstall", action="store_true",
-                        help="Remove the app, its shortcuts and its entry in the Windows settings")
+                        help="Remove the app and its shortcuts. The engine and the models are kept")
+    parser.add_argument("--setup", action="store_true",
+                        help="Start a needed setup right away instead of waiting for the click in the window")
+    parser.add_argument("--location", help="Folder for the engine and the model, for --setup")
+    parser.add_argument("--console", action="store_true", default=None,
+                        help="Print the log to the terminal (default on Linux without a window)")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--mock-server", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--mock-speed", type=float, default=1.0, help=argparse.SUPPRESS)
@@ -488,12 +540,18 @@ def main(argv: list[str] | None = None) -> int:
             _message_box(uninstall_message(config), icon=0x40)
             installer.uninstall_app()
             return 0
+        if config.open_window and not has_display():
+            config.open_window = False  # no desktop: the dashboard is still there for a browser or an SSH tunnel
         station = Station(config)
+        station.auto_setup = bool(args.setup)
+        station.setup_location = args.location or ""
+        station.console = args.console if args.console is not None else (
+            os.name != "nt" and not config.open_window and sys.stdout is not None)
         if args.check:
             supervisor = station.supervisor
             checks = supervisor.run_preflight(supervisor.probe_api()[0])
             supervisor.refresh_clients(write=False)
-            report = {"mode": config.mode, "root": config.root, "distro": config.distro,
+            report = {"mode": config.mode, "prefix": config.prefix, "root": config.root, "distro": config.distro,
                       "setup": station.setup.check(), "preflight": checks, "gpu_processes": supervisor.gpu_processes,
                       "clients": supervisor.clients}
             if sys.stdout is not None:
@@ -503,6 +561,17 @@ def main(argv: list[str] | None = None) -> int:
             if config.open_window:
                 launch_window(f"http://127.0.0.1:{config.station_port}/")  # already running: just show it
             return 0
+        def stop(signum, frame) -> None:  # kill, a closed terminal: stop the model in order
+            station.quit_event.set()
+
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                try:
+                    signal.signal(getattr(signal, name), stop)
+                except (ValueError, OSError):
+                    pass
+        if os.name != "nt" and sys.stdout is not None:
+            print(f"Qwen Station {__version__}: dashboard {station.url}, API {config.api_base_url}", flush=True)
         return station.run()
     except OSError as exc:
         LOG.exception("startup failed")

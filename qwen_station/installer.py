@@ -1,6 +1,8 @@
 """Installs the app itself on Windows: a copy below %LOCALAPPDATA%\\Programs, shortcuts, an uninstall entry.
 
 No admin rights are needed; everything lives in the user's profile.
+
+On Linux the installer script (packaging/linux-setup.sh) puts the app in place; this module only removes it.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ EXE_NAME = "Qwen-Station.exe"
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\QwenStation"
 RUN_ONCE_KEY = r"Software\Microsoft\Windows\CurrentVersion\RunOnce"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+IS_WINDOWS = os.name == "nt"
 
 
 def install_dir() -> Path:
@@ -138,8 +141,24 @@ def install_app() -> Path:
     return target
 
 
+def linux_paths() -> dict[str, Path]:
+    """Where packaging/linux-setup.sh puts the app. Keep both in step."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share"))
+    return {"app": data / "qwen-station" / "app",
+            "launcher": Path.home() / ".local" / "bin" / "qwen-station",
+            "desktop": data / "applications" / "qwen-station.desktop",
+            "icon": data / "icons" / "hicolor" / "256x256" / "apps" / "qwen-station.png"}
+
+
 def uninstall_app() -> None:
     """Remove shortcuts, the uninstall entry and the installed exe. The engine and the models stay."""
+    if not IS_WINDOWS:
+        for name, path in linux_paths().items():
+            if name == "app":
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        return
     import winreg
     _powershell(_REMOVE_SHORTCUTS, QS_START_LINK=str(start_menu_link()))
     try:

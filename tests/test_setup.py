@@ -71,6 +71,7 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(setup.split_lines(rest + b"\ntwo\n")[0], [("one", False), ("two", False)])
 
 
+@unittest.skipUnless(os.name == "nt", "the WSL setup with its Windows paths")
 class SetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -233,12 +234,15 @@ class SetupTests(unittest.TestCase):
 
 
 class ModeTests(unittest.TestCase):
+    """How the app picks its mode on Windows. The Linux side is in test_linux.py."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": self.temp.name})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (mock.patch.dict(os.environ, {"LOCALAPPDATA": self.temp.name}),
+                        mock.patch.object(config_module, "IS_WINDOWS", True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_an_app_without_start_scripts_is_managed(self):
         with mock.patch.object(config_module, "app_dir", return_value=Path(self.temp.name)):
@@ -297,6 +301,7 @@ class InstallerTests(unittest.TestCase):
     def test_a_source_checkout_is_never_installed(self):
         self.assertFalse(installer.install_needed())
 
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
     def test_install_location_is_per_user(self):
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\x\AppData\Local"}):
             self.assertEqual(str(installer.installed_exe()), r"C:\Users\x\AppData\Local\Programs\Qwen Station\Qwen-Station.exe")

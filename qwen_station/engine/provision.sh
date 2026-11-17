@@ -8,7 +8,7 @@
 #   provision.sh model-unsloth    optional second target
 #
 # Lines starting with "::" are machine-readable progress for Qwen Station:
-#   ::step <id> start|done|skip|fail      ::progress <id> <bytes> <total>
+#   ::step <id> start|done|skip|fail      ::progress <id> <bytes> <total>      ::hint <id> <what the user can do>
 set -uo pipefail
 
 ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,11 +31,35 @@ step_system() {
   if command -v c++ >/dev/null && command -v curl >/dev/null && command -v make >/dev/null; then
     say "Compiler and curl are present."; return 0
   fi
-  if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null; then
-    say "A C++ compiler or curl is missing. Install them (Debian/Ubuntu: build-essential curl ca-certificates)."
+  # Something is missing. Installing it is the one thing here that needs root rights.
+  local install hint
+  if command -v apt-get >/dev/null; then
+    install="apt-get update -q && apt-get install -y -q --no-install-recommends build-essential curl ca-certificates"
+    hint="sudo apt-get update && sudo apt-get install -y build-essential curl ca-certificates"
+  elif command -v dnf >/dev/null; then
+    install="dnf install -y gcc-c++ make curl ca-certificates"; hint="sudo $install"
+  elif command -v pacman >/dev/null; then
+    install="pacman -Sy --noconfirm --needed base-devel curl ca-certificates"; hint="sudo $install"
+  elif command -v zypper >/dev/null; then
+    install="zypper --non-interactive install gcc-c++ make curl ca-certificates"; hint="sudo $install"
+  else
+    say "A C++ compiler, make or curl is missing, and no known package manager was found."
+    printf '::hint system %s\n' "A C++ compiler, make or curl is missing. Install them with your package manager, then run the setup again."
     return 1
   fi
-  apt-get update -q && apt-get install -y -q --no-install-recommends build-essential curl ca-certificates
+  if [ "$(id -u)" = 0 ]; then
+    sh -c "$install"; return
+  fi
+  if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+    sudo -n sh -c "$install" && return 0
+  fi
+  if command -v pkexec >/dev/null && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    say "A compiler is missing. The system asks for your password to install it."
+    pkexec sh -c "$install" && return 0
+  fi
+  say "A C++ compiler, make or curl is missing, and installing them needs root rights."
+  printf '::hint system %s\n' "A compiler is missing. Run this once in a terminal, then start the setup again: $hint"
+  return 1
 }
 
 step_uv() {
@@ -44,8 +68,13 @@ step_uv() {
 }
 
 step_venv() {
-  if [ -x "$VENV/bin/python" ]; then say "The Python environment is present."; return 0; fi
-  "$UV" venv "$VENV" --python "$PYTHON_VERSION"
+  # A Python of uv's own, never the system's: it brings its headers, which the GPU kernel build needs
+  # (a distribution's python3 comes without them), and it is the same on every distribution.
+  if [ -x "$VENV/bin/python" ] && readlink -f "$VENV/bin/python" | grep -q "^$PREFIX/python/"; then
+    say "The Python environment is present."; return 0
+  fi
+  rm -rf "$VENV"
+  "$UV" venv "$VENV" --python "$PYTHON_VERSION" --managed-python
 }
 
 step_vllm() {

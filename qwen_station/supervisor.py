@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -187,9 +188,12 @@ class WslLauncher:
     def status_file(self) -> str:
         return f"{self.config.linux_root}/logs/dflash-status.txt"
 
-    def stop_script(self) -> str:
+    def stop_pattern(self) -> str:
         # Same match the wrapper uses for its own cleanup: Qwen3.8-27B servers, wherever the weights live.
-        pattern = r"vllm serve [^ ]*/Qwen3\.8-27B"
+        return r"vllm serve [^ ]*/Qwen3\.8-27B"
+
+    def stop_script(self) -> str:
+        pattern = self.stop_pattern()
         # SIGTERM also ends the wrapper before it can update its status file, so the script does it.
         status = self.status_file()
         return (
@@ -257,8 +261,17 @@ class WslLauncher:
 class ManagedLauncher(WslLauncher):
     """The release: serve.sh from the engine bundle, inside the distribution the app set up."""
 
+    host_label = "WSL distribution"
+
     def wsl(self) -> list[str]:
         return ["wsl.exe", "-d", self.config.distro, "-u", "root", "--exec"]
+
+    def models(self) -> str:
+        return self.config.model_base or f"{self.config.prefix}/models"
+
+    def stop_pattern(self) -> str:
+        # Only servers of this installation: on a shared Linux machine other vLLM servers are none of our business.
+        return "vllm serve " + self.models().replace(".", r"\.") + "/"
 
     def script(self) -> list[str]:
         return ["bash", f"{self.config.prefix}/engine/serve.sh"]
@@ -268,7 +281,7 @@ class ManagedLauncher(WslLauncher):
 
     def file_checks(self, preset: dict | None = None) -> list[dict]:
         target = (preset or {}).get("env", {}).get("TARGET_NAME", TARGET_DIR)
-        base = self.config.model_base or f"{self.config.prefix}/models"
+        base = self.models()
         needed = {
             f"{self.config.prefix}/installed.json": "The engine is not set up",
             f"{base}/{target}/config.json": f"The model {target} is not installed",
@@ -283,7 +296,32 @@ class ManagedLauncher(WslLauncher):
             if not found:
                 missing.append(message)
         return [{"id": "files", "label": "Installation", "ok": not missing, "blocking": True,
-                 "detail": "; ".join(missing) if missing else f"{self.config.distro}:{self.config.prefix}"}]
+                 "detail": "; ".join(missing) if missing else self.location()}]
+
+    def location(self) -> str:
+        return f"{self.config.distro}:{self.config.prefix}"
+
+
+class NativeLauncher(ManagedLauncher):
+    """Linux: the same serve.sh, started directly."""
+
+    host_label = "System"
+    gpu_index: int | None = None  # set by the preflight: the card that matched, in PCI bus order
+
+    def wsl(self) -> list[str]:
+        return []
+
+    def location(self) -> str:
+        return self.config.prefix
+
+    def command(self, preset: dict) -> list[str]:
+        command = super().command(preset)  # ["env", KEY=VALUE ..., "bash", serve.sh]
+        if self.gpu_index is not None:
+            command.insert(1, f"GPU_INDEX={self.gpu_index}")
+        return command
+
+    def distro_check(self) -> tuple[bool, str]:
+        return True, f"{platform.system()} {platform.release()}"
 
 
 class MockLauncher:
@@ -322,7 +360,8 @@ class Supervisor:
         self.config = config
         self.launcher = launcher or (
             MockLauncher(config) if config.mock
-            else ManagedLauncher(config) if config.mode == "managed" else WslLauncher(config))
+            else ManagedLauncher(config) if config.mode == "managed"
+            else NativeLauncher(config) if config.mode == "native" else WslLauncher(config))
         self.log = LogBuffer()
         self.state = "idle"
         self.state_since = time.time()
@@ -418,7 +457,8 @@ class Supervisor:
     def run_preflight(self, port_state: str) -> list[dict]:
         checks = list(self.launcher.file_checks(PRESETS[self.preset]))
         ok, detail = self.launcher.distro_check()
-        checks.append({"id": "wsl", "label": "WSL distribution", "ok": ok, "blocking": True, "detail": detail})
+        checks.append({"id": "wsl", "label": getattr(self.launcher, "host_label", "WSL distribution"), "ok": ok,
+                       "blocking": True, "detail": detail})
         checks.append({"id": "port", "label": f"Port {self.config.api_port}", "ok": port_state != "foreign",
                        "blocking": True,
                        "detail": "free" if port_state == "free" else
@@ -429,6 +469,8 @@ class Supervisor:
         if not self.config.mock:
             try:
                 row = gpu.pick(gpu.query_once(), self.config.gpu_match)
+                if row and isinstance(self.launcher, NativeLauncher):
+                    self.launcher.gpu_index = row.get("index")
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 row = None
                 checks.append({"id": "vram", "label": "Free VRAM", "ok": False, "blocking": False,
@@ -451,12 +493,16 @@ class Supervisor:
                 if fitted:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM is free. For {_dots(preset['context'])} "
                                f"tokens the model needs about {_gib(need)} GiB, so the context is reduced to "
-                               f"{_dots(fitted[0])} tokens. Otherwise Windows pages out GPU memory and the speed "
-                               "drops to a quarter. For the full context, close other GPU programs and start again.")
+                               f"{_dots(fitted[0])} tokens. "
+                               + ("Otherwise the server runs out of GPU memory. " if self.config.mode == "native" else
+                                  "Otherwise Windows pages out GPU memory and the speed drops to a quarter. ")
+                               + "For the full context, close other GPU programs and start again.")
                 if tight:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM was free at the start, and the model takes "
-                               f"about {_gib(need)} GiB. Windows then pages out the GPU memory of other programs. "
-                               "The start takes longer and the speed can suffer.")
+                               f"about {_gib(need)} GiB. "
+                               + ("The start can fail with an out-of-memory error." if self.config.mode == "native" else
+                                  "Windows then pages out the GPU memory of other programs. "
+                                  "The start takes longer and the speed can suffer."))
                 if not enough:
                     processes = gpu.gpu_processes(max_mib=row["mem_total"])
         with self._lock:
@@ -528,7 +574,12 @@ class Supervisor:
             self._set_state("blocked", reason)
             return
         if self.config.lan and not self.config.mock:
-            self._ensure_lan()
+            if self.config.mode == "native":
+                self.log.add(f"--- LAN: the API listens on all interfaces, port {self.config.api_port}. "
+                             "It has no authentication; open the port in your firewall only for a trusted network.",
+                             "step")
+            else:
+                self._ensure_lan()
         with self._lock:
             self.generation += 1
             self.facts = {}
@@ -545,8 +596,11 @@ class Supervisor:
         self.log.add(f"=== Start: preset {self.preset}, context {preset['context']}, "
                      f"KV {preset['kv_bytes']} bytes, {preset['max_seqs']} slot(s)", "step")
         try:
+            # Its own session on Linux: Ctrl+C in the terminal reaches the station only, which then
+            # stops the server in order.
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                                       stdin=subprocess.DEVNULL, creationflags=NO_WINDOW,
+                                       start_new_session=os.name != "nt")
         except OSError as exc:
             self._fail(f"The start command could not be run: {exc}")
             return

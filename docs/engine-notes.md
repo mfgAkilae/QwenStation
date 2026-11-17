@@ -63,6 +63,10 @@ downloads the kernels of six GPU generations.
 toolkit. `provision.sh` adds what a kernel build needs at its link step: `lib64`, unversioned names such as
 `libcudart.so`, and `libcuda.so` from the GPU driver.
 
+**A Python of uv's own, not the system's.** A distribution's `python3` comes without its headers, and the
+kernel build needs them. `provision.sh` therefore creates the venv with `--managed-python`: the same Python 3.12
+with headers on every distribution.
+
 **Weights on the Linux filesystem.** Loading from a Windows drive through `/mnt` took about four minutes;
 from the distribution's own disk a start takes 45 to 80 seconds.
 
@@ -92,6 +96,10 @@ at start):
 
 A second run in the same installation gave 287 to 297 tok/s short and 231 to 305 tok/s at 129K: the spread
 between runs is about 10 %.
+
+Native Linux mode (release file 1.1.0, Ubuntu 24.04 inside WSL 2, user without root rights), 2026-11-17, context
+limit 196,608 tokens: 272 to 346 tok/s short, 261 to 292 tok/s at 33K, 203 to 211 tok/s at 129K. Setup 381 seconds,
+28 GB on disk, first start 199 seconds, second start 81 seconds.
 
 Setup time on a 35 MB/s connection: 446 seconds from the click to a complete installation (model download 17.9 GB
 included), 31 GB on disk afterwards. First start: 166 seconds. Later starts: 47 to 80 seconds.

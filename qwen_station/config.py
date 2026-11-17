@@ -19,6 +19,7 @@ MANAGED_DISTRO = "QwenStation"
 MANAGED_PREFIX = "/opt/qwen-station"
 MANAGED_BASE_IMAGE = "Ubuntu-26.04"
 CONFIG_NAME = "qwen-station.json"
+IS_WINDOWS = os.name == "nt"
 TARGET_DIR = "Qwen3.8-27B-NVFP4-RTX5090-Gittensor"
 DRAFTER_DIR = "Qwen3.8-27B-DFlash2-FP8"
 WRAPPER_SCRIPT = "run-variant-logged.sh"
@@ -64,10 +65,11 @@ PRESETS = {
 
 @dataclass
 class Config:
-    # "managed": engine installed by the app (the release). "legacy": the hand-built folder with the
-    # start scripts (root) inside an existing distribution, kept for development.
+    # "managed": Windows, engine installed by the app into its own WSL distribution (the release).
+    # "native": Linux, engine installed by the app into a folder of the user (the release).
+    # "legacy": a hand-built folder with its own start scripts (root) in an existing distribution.
     mode: str = "legacy"
-    prefix: str = MANAGED_PREFIX  # managed: install folder inside the distribution
+    prefix: str = MANAGED_PREFIX  # managed: install folder inside the distribution. native: the engine folder
     engine_location: str = ""  # managed: Windows folder that holds the distribution's disk
     setup_pending: bool = False  # managed: the setup waits for a restart of Windows and continues after it
     root: str = DEFAULT_ROOT
@@ -102,8 +104,8 @@ class Config:
     def validate(self) -> None:
         if self.preset not in PRESETS:
             raise ValueError(f"Unknown preset: {self.preset}")
-        if self.mode not in ("managed", "legacy"):
-            raise ValueError("mode must be 'managed' or 'legacy'")
+        if self.mode not in ("managed", "native", "legacy"):
+            raise ValueError("mode must be 'managed', 'native' or 'legacy'")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
         for name in ("api_port", "station_port"):
@@ -128,10 +130,18 @@ def app_dir() -> Path:
 
 
 def data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
-    path = Path(base) / "QwenStation"
+    """Settings, the station's own log and the browser profile of the window."""
+    if IS_WINDOWS:
+        path = Path(os.environ.get("LOCALAPPDATA") or str(Path.home())) / "QwenStation"
+    else:
+        path = Path(os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")) / "qwen-station"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def native_prefix() -> str:
+    """Default folder of the engine on Linux."""
+    return str(Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")) / "qwen-station")
 
 
 def resource_path(name: str) -> Path:
@@ -230,10 +240,12 @@ def load_config(explicit_path: str | None = None, overrides: dict | None = None)
     if "mode" not in file_values and not (overrides or {}).get("mode"):
         # A folder with the start scripts means the hand-built setup; everything else is the release.
         legacy = root_given or (app_dir() / WRAPPER_SCRIPT).is_file()
-        config.mode = "legacy" if legacy else "managed"
+        config.mode = "legacy" if legacy else ("managed" if IS_WINDOWS else "native")
     if config.mode == "legacy" and not root_given:
         config.root = find_root([str(app_dir()), DEFAULT_ROOT])
     if config.mode == "managed" and "distro" not in file_values and not (overrides or {}).get("distro"):
         config.distro = MANAGED_DISTRO
+    if config.mode == "native" and "prefix" not in file_values:
+        config.prefix = native_prefix()
     config.validate()
     return config

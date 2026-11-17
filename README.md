@@ -161,6 +161,15 @@ The engine bundle does not depend on Windows: `provision.sh` and `serve.sh` find
 install prefix and run on a native Linux with an NVIDIA driver. The app around them (setup, window,
 installer) is Windows-only for now.
 
+## License
+
+Qwen Station is released under the [MIT License](LICENSE).
+
+It does not ship vLLM, PyTorch or the model weights. The setup downloads them from PyPI and Hugging Face, and
+each keeps its own license: vLLM, the model (`gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090`) and the drafter
+(`TechPrototyper/Qwen3.8-27B-DFlash2-fp8-vllm`) are Apache 2.0. The scripts in `qwen_station/engine/patches/`
+change the installed vLLM on your machine.
+
 ## Tested, and not tested
 
 Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3) with the release exe: uninstall,

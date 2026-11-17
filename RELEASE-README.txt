@@ -40,5 +40,6 @@ Remove
 - Engine and model (about 32 GB): in PowerShell run "wsl --unregister QwenStation".
 - Settings and logs: delete the folder %LOCALAPPDATA%\QwenStation.
 
-Licenses: vLLM and the models are Apache 2.0 and are downloaded during the setup from PyPI and
-Hugging Face (gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090, TechPrototyper/Qwen3.8-27B-DFlash2-fp8-vllm).
+Licenses: Qwen Station itself is MIT (https://github.com/mfgAkilae/QwenStation). vLLM and the models are
+Apache 2.0 and are downloaded during the setup from PyPI and Hugging Face
+(gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090, TechPrototyper/Qwen3.8-27B-DFlash2-fp8-vllm).

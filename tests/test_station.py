@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 from qwen_station.app import Station
-from qwen_station.config import Config
+from qwen_station.config import PRESETS, Config
 from qwen_station.supervisor import LogBuffer, MockLauncher, Supervisor, WslLauncher
 
 
@@ -234,6 +234,27 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual((supervisor.effective_preset()["context"], supervisor.effective_preset()["kv_bytes"]),
                          (200704, 8_300_000_000))
         self.assertEqual(supervisor.snapshot()["context"], 200704)
+
+    def test_more_draft_tokens_take_kv_memory_and_so_context(self):
+        from qwen_station.supervisor import fit_context, kv_pool_bytes
+        # Measured 2026-11-17 for 163,840 tokens: the server needed 7.15 GiB with 11 and 7.84 GiB with 15 draft tokens.
+        self.assertGreater(kv_pool_bytes(163840, 11), 7.15 * 2 ** 30)
+        self.assertGreater(kv_pool_bytes(163840, 15), 7.84 * 2 ** 30)
+        self.assertLess(kv_pool_bytes(163840, 15), 8.1 * 2 ** 30)
+        self.assertEqual(kv_pool_bytes(163840, 7), fit_context(27.6 * 1024, 163840)[1])
+        self.assertEqual(kv_pool_bytes(163840, 3), kv_pool_bytes(163840, 7))  # fewer never shrinks the pool
+        free = 31.2 * 1024
+        self.assertEqual(fit_context(free, 262144)[0], 262144)
+        self.assertEqual(fit_context(free, 262144, draft_tokens=11)[0], 229376)
+        self.assertEqual(fit_context(free, 262144, draft_tokens=15)[0], 229376)
+        self.assertEqual(fit_context(29.0 * 1024, 262144, draft_tokens=15)[0], 163840)
+        launcher = WslLauncher(Config(root=r"D:\qwen-engine", draft_tokens=11))
+        self.assertIn("SPEC_TOKENS=11", launcher.command(PRESETS["262k"]))
+        self.assertNotIn("SPEC_TOKENS=11", launcher.command(PRESETS["parallel-96k"]))  # single slot only
+        self.assertFalse([part for part in WslLauncher(Config(root=r"D:\qwen-engine")).command(PRESETS["262k"])
+                          if part.startswith("SPEC_TOKENS")])
+        with self.assertRaises(ValueError):
+            Config(draft_tokens=16).validate()
 
     def test_stop_script_only_targets_this_installation(self):
         script = WslLauncher(Config(root=r"D:\qwen-engine")).stop_script()

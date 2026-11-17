@@ -492,6 +492,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Leave the OpenCode and Pi entries alone (for experiments)")
     parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
                         help="Do not shrink the context automatically when VRAM is short")
+    parser.add_argument("--draft-tokens", type=int, dest="draft_tokens",
+                        help="Draft tokens per round (default 7). More speeds up reasoning and code, and costs context")
     parser.add_argument("--keep", action="store_const", const="keep", dest="close_action", default=None,
                         help="Keep the model running when the window closes")
     parser.add_argument("--mock", action="store_true", default=None, help="Fake server instead of the GPU, for trying things out")
@@ -527,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         overrides = {key: getattr(args, key) for key in
                      ("root", "preset", "lan", "station_port", "api_port", "autostart", "open_window", "close_action",
-                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens",
                       "register_clients")}
         config = load_config(args.config, overrides)
         if config.mock:

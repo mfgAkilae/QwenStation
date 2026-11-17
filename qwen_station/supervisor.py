@@ -18,7 +18,8 @@ from collections import deque
 from pathlib import Path
 
 from . import clients, gpu
-from .config import (DRAFTER_DIR, MODEL_ID, PRESETS, TARGET_DIR, WRAPPER_SCRIPT, Config, app_dir, data_dir,
+from .config import (DEFAULT_DRAFT_TOKENS, DRAFTER_DIR, MODEL_ID, PRESETS, TARGET_DIR, WRAPPER_SCRIPT, Config,
+                     app_dir, data_dir,
                      resource_path)
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -31,6 +32,10 @@ VRAM_TOLERANCE_MIB = 3072  # only used when fit_context is off
 # (P - 1.546) * 32730 tokens (9.64 GiB -> 264,910 tokens, 6.61 GiB -> 165,737 tokens).
 KV_FIXED_GIB = 1.546
 KV_TOKENS_PER_GIB = 32730
+# Every draft token beyond the default 7 adds a state snapshot per Mamba layer to the fixed part. Measured
+# 2026-11-17 at 163,840 tokens: 6.52 GiB with 7 draft tokens, 6.83 with 9, 7.15 with 11, 7.84 with 15,
+# which is 0.158 to 0.165 GiB per token. A little more is reserved here.
+KV_PER_DRAFT_TOKEN_GIB = 0.17
 # Free VRAM the server needs beside its KV pool: weights and runtime (20.4 GiB measured) plus a margin.
 # With less, Windows pages GPU memory and the speed drops to a quarter (prefill 1,825 against 8,800 tok/s).
 FIT_RESERVE_GIB = 21.0
@@ -40,13 +45,23 @@ MIN_FIT_CONTEXT = 65536
 FIT_STEP = 32768
 
 
-def fit_context(free_mib: float, max_context: int, reserve_gib: float = FIT_RESERVE_GIB) -> tuple[int, int] | None:
+def kv_fixed_gib(draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> float:
+    """The part of the KV pool that does not depend on the context."""
+    return KV_FIXED_GIB + KV_PER_DRAFT_TOKEN_GIB * max(0, draft_tokens - DEFAULT_DRAFT_TOKENS)
+
+
+def kv_pool_bytes(context: int, draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> int:
+    return int((kv_fixed_gib(draft_tokens) + context / KV_TOKENS_PER_GIB) * 1.01 * 2 ** 30)
+
+
+def fit_context(free_mib: float, max_context: int, reserve_gib: float = FIT_RESERVE_GIB,
+                draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> tuple[int, int] | None:
     """Largest context (and its KV pool in bytes) that fits into the free VRAM, or None if too little is free."""
-    tokens = (free_mib / 1024 - reserve_gib - KV_FIXED_GIB) * KV_TOKENS_PER_GIB
+    tokens = (free_mib / 1024 - reserve_gib - kv_fixed_gib(draft_tokens)) * KV_TOKENS_PER_GIB
     context = min(max_context, int(tokens) // FIT_STEP * FIT_STEP)
     if context < MIN_FIT_CONTEXT:
         return None
-    return context, int((KV_FIXED_GIB + context / KV_TOKENS_PER_GIB) * 1.01 * 2 ** 30)
+    return context, kv_pool_bytes(context, draft_tokens)
 # Measured 2026-11-16 on vLLM 0.29.0: 128 against 254 tok/s at 33K context, 51 against 178 tok/s at 129K.
 XQA_WARNING = ("The server uses the XQA decode kernel. With spec decode, the speed drops sharply at long context "
                "(measured up to 3.5 times slower). The current start script forces the native kernel.")
@@ -175,6 +190,8 @@ class WslLauncher:
             env.append(f"VLLM_PREFIX={config.vllm_prefix}")
         if config.model_base:
             env.append(f"MODEL_BASE={config.model_base}")
+        if config.draft_tokens != DEFAULT_DRAFT_TOKENS and preset["max_seqs"] == 1:
+            env.append(f"SPEC_TOKENS={config.draft_tokens}")
         env.extend(f"{key}={value}" for key, value in preset.get("env", {}).items())  # e.g. another target
         env.extend(config.extra_env.split())  # KEY=VALUE pairs for the start scripts, e.g. KV_DTYPE=nvfp4
         return [*self.wsl(), "env", *env, *self.script()]
@@ -480,23 +497,34 @@ class Supervisor:
                 need = math.ceil(self.config.gpu_memory_utilization * row["mem_total"])
                 enough = row["mem_free"] >= need
                 preset = PRESETS[self.preset]
-                if not enough and self.config.fit_context and preset["max_seqs"] == 1:
+                drafts = self.config.draft_tokens if preset["max_seqs"] == 1 else DEFAULT_DRAFT_TOKENS
+                more_drafts = drafts > DEFAULT_DRAFT_TOKENS  # the preset's KV pool is sized for the default
+                if self.config.fit_context and preset["max_seqs"] == 1 and (not enough or more_drafts):
                     fitted = fit_context(row["mem_free"], preset["context"],
-                                         preset.get("fit_reserve_gib", FIT_RESERVE_GIB))
+                                         preset.get("fit_reserve_gib", FIT_RESERVE_GIB), drafts)
+                elif more_drafts:
+                    fitted = (preset["context"], kv_pool_bytes(preset["context"], drafts))
+                reduced = fitted is not None and fitted[0] < preset["context"]
                 tight = not enough and not self.config.fit_context and row["mem_free"] >= need - VRAM_TOLERANCE_MIB
                 detail = f"{_gib(row['mem_free'])} GiB free, the model takes about {_gib(need)} GiB"
-                if fitted:
+                if reduced:
                     detail += f"; context reduced to {_dots(fitted[0])} tokens"
                 checks.append({"id": "vram", "label": "Free VRAM", "ok": enough or tight or fitted is not None,
-                               "warn": tight or fitted is not None, "blocking": False,
+                               "warn": tight or reduced, "blocking": False,
                                "free_mib": row["mem_free"], "need_mib": need, "detail": detail})
-                if fitted:
+                if reduced and enough:
+                    warning = (f"With {drafts} draft tokens per round the KV cache needs more memory, so the context "
+                               f"is {_dots(fitted[0])} instead of {_dots(preset['context'])} tokens. "
+                               f"Set draft_tokens to {DEFAULT_DRAFT_TOKENS} for the largest context.")
+                elif reduced:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM is free. For {_dots(preset['context'])} "
                                f"tokens the model needs about {_gib(need)} GiB, so the context is reduced to "
                                f"{_dots(fitted[0])} tokens. "
                                + ("Otherwise the server runs out of GPU memory. " if self.config.mode == "native" else
                                   "Otherwise Windows pages out GPU memory and the speed drops to a quarter. ")
-                               + "For the full context, close other GPU programs and start again.")
+                               + "For the full context, close other GPU programs and start again."
+                               + (f" {drafts} draft tokens per round also take part of the memory."
+                                  if more_drafts else ""))
                 if tight:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM was free at the start, and the model takes "
                                f"about {_gib(need)} GiB. "

@@ -24,6 +24,10 @@ TARGET_DIR = "Qwen3.8-27B-NVFP4-RTX5090-Gittensor"
 DRAFTER_DIR = "Qwen3.8-27B-DFlash2-FP8"
 WRAPPER_SCRIPT = "run-variant-logged.sh"
 OUTPUT_LIMIT = 32768
+# Draft tokens per round of the DFlash2 drafter. 7 is its trained block; more helps predictable text
+# (reasoning, code) and costs KV memory, so context. Measured up to 15, see docs/engine-notes.md.
+DEFAULT_DRAFT_TOKENS = 7
+MAX_DRAFT_TOKENS = 15
 
 # "context" includes the generated output.
 PRESETS = {
@@ -85,6 +89,7 @@ class Config:
     register_clients: bool = True
     open_window: bool = True
     fit_context: bool = True  # shrink the context when too little VRAM is free, instead of paging
+    draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
     extra_args: str = ""  # appended to the `vllm serve` command line, for experiments
     vllm_prefix: str = ""  # venv to run, e.g. /opt/vllm-0.32.0; empty: the start script's default
     model_base: str = ""  # WSL folder holding target and drafter; empty: the Windows folder via /mnt
@@ -106,6 +111,8 @@ class Config:
             raise ValueError(f"Unknown preset: {self.preset}")
         if self.mode not in ("managed", "native", "legacy"):
             raise ValueError("mode must be 'managed', 'native' or 'legacy'")
+        if isinstance(self.draft_tokens, bool) or not 1 <= self.draft_tokens <= MAX_DRAFT_TOKENS:
+            raise ValueError(f"draft_tokens must be a number from 1 to {MAX_DRAFT_TOKENS}")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
         for name in ("api_port", "station_port"):
@@ -177,6 +184,7 @@ _FILE_KEYS = {
     "register_clients": bool,
     "open_window": bool,
     "fit_context": bool,
+    "draft_tokens": int,
     "extra_args": str,
     "vllm_prefix": str,
     "model_base": str,

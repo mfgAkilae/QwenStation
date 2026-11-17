@@ -8,7 +8,7 @@
 #   TARGET_NAME, TARGET_QUANT     another target below models/ (default: the Gittensor NVFP4 build, modelopt)
 #   EFFORT                        default reasoning_effort (low | medium | xhigh)
 #   EXTRA_ARGS                    appended to `vllm serve`; later arguments win
-#   XQA_DECODE, SPEC_MODE, SPEC_TOKENS, KV_GROUP_SIZE, AUTOTUNE_PIN   switches for experiments, see below
+#   XQA_DECODE, SPEC_MODE, SPEC_TOKENS, DRAFTER_NAME, KV_GROUP_SIZE, AUTOTUNE_PIN   switches for experiments, see below
 #
 # The reasons behind the non-obvious choices are measured and written up in docs/engine-notes.md.
 set -uo pipefail
@@ -86,11 +86,19 @@ if [ "$XQA_DEFAULT" = 1 ]; then
   export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="${VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS-fp4_gemm}"
 fi
 
-# SPEC_MODE=mtp uses the MTP head inside the checkpoint instead of the drafter (needs KV_GROUP_SIZE=auto).
-SPEC_JSON='{"method":"dflash","model":"'"$MODELS/$DRAFTER_DIR"'","quantization":"compressed-tensors","num_speculative_tokens":7}'
-if [ "${SPEC_MODE:-dflash}" = mtp ]; then
-  SPEC_JSON='{"method":"mtp","num_speculative_tokens":'"${SPEC_TOKENS:-2}"'}'
-fi
+# Speculative decoding. The default is the DFlash2 drafter with 7 draft tokens per round. For experiments:
+#   SPEC_TOKENS    draft tokens per round
+#   SPEC_MODE      dflash (default), dspark (another drafter family), mtp (the head inside the checkpoint,
+#                  needs KV_GROUP_SIZE=auto), none
+#   DRAFTER_NAME   folder of another drafter below models/, DRAFTER_QUANT its quantization
+#   SPEC_EXTRA     more JSON fields for --speculative-config, starting with a comma
+case "${SPEC_MODE:-dflash}" in
+  mtp)  SPEC_JSON='{"method":"mtp","num_speculative_tokens":'"${SPEC_TOKENS:-2}${SPEC_EXTRA:-}"'}' ;;
+  none) SPEC_JSON="" ;;
+  *)    SPEC_JSON='{"method":"'"${SPEC_MODE:-dflash}"'","model":"'"$MODELS/${DRAFTER_NAME:-$DRAFTER_DIR}"'","quantization":"'"${DRAFTER_QUANT:-compressed-tensors}"'","num_speculative_tokens":'"${SPEC_TOKENS:-7}${SPEC_EXTRA:-}"'}' ;;
+esac
+SPEC_ARGS=()
+[ -n "$SPEC_JSON" ] && SPEC_ARGS=(--speculative-config "$SPEC_JSON")
 
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -134,7 +142,7 @@ echo running > "$STATUS"
 "$VENV/bin/vllm" serve "$MODELS/$TARGET_NAME" \
   --host "${VLLM_HOST:-127.0.0.1}" --port "${VLLM_PORT:-8000}" --served-model-name qwen38-gittensor-dflash \
   --quantization "$TARGET_QUANT" --linear-backend auto "${KV_ARGS[@]}" \
-  --speculative-config "$SPEC_JSON" \
+  "${SPEC_ARGS[@]}" \
   --max-model-len "${CTX:-262144}" --gpu-memory-utilization "${GPU_UTIL:-0.92}" \
   --max-num-seqs "$MAX_SEQS" --max-num-batched-tokens "$PREFILL_BATCH" --long-prefill-token-threshold "$PREFILL_BATCH" \
   --enable-prefix-caching --enable-prompt-tokens-details --cudagraph-capture-sizes 1 2 4 8 16 32 64 128 \

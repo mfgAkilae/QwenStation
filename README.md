@@ -8,8 +8,13 @@ what the model is doing. For Windows and for Linux.
 - **Engine:** vLLM 0.32.0 with five small patches and verified kernel tuning. On Windows it runs in its own
   WSL distribution, on Linux in one folder of your user.
 - **API:** `http://127.0.0.1:8000/v1`, model `qwen38-gittensor-dflash`, no API key
-- **Speed on the test machine:** 270 to 320 tok/s on short prompts, 260 to 290 tok/s at 33K context,
-  200 to 260 tok/s at 129K context; up to 262,144 tokens of context
+- **Speed on the test machine:** it depends on what the model writes. Short prompts: about 160 tok/s for
+  prose, 330 for code, 450 for step-by-step reasoning. Behind 137K tokens of context: 190, 240 and 320.
+  Up to 262,144 tokens of context. [Details and how to measure it yourself](#speed).
+- **Verified runs on LocalMaxxing**
+  ([listed here](https://www.localmaxxing.com/en/models/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090)):
+  381.5 tok/s on `reasoning-v1` and 293 tok/s on `code-v1` with the default setting; 439.9 and 290.5 tok/s
+  with `draft_tokens` 15
 
 ![The dashboard while the model answers a request](docs/dashboard.png)
 
@@ -151,12 +156,59 @@ Optional file `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Linux `~/.confi
   for the private network (asks for administrator rights once); on Linux the firewall is yours to open. The API
   has no authentication, so the default is local only.
 - `fit_context`: `false` switches the automatic context reduction off.
+- `draft_tokens`: how many tokens the drafter proposes per round, 7 by default, up to 15. More makes reasoning
+  17 to 30 percent faster and costs about 5,400 tokens of context each, see [Speed](#speed). Single-slot presets only.
 - `extra_args`: appended to `vllm serve`. `extra_env`: `KEY=VALUE` pairs for the start script, for example
   `XQA_DECODE=0`.
 
 The same values work as command line options: `Qwen-Station.exe --preset 237k --keep --no-autostart`, on Linux
 `qwen-station --preset 237k --no-autostart`. `--check` prints the state of the installation as JSON and exits.
 `--setup` starts a needed setup without the click, `--location` names its folder.
+
+## Speed
+
+Speculative decoding makes the speed depend on the text: the drafter proposes several tokens per round, the
+model keeps the ones it would have written itself. The server does about 61 rounds per second with a short
+context and 54 behind 137K tokens. Predictable text keeps more tokens per round.
+
+Measured on 2026-11-17 with `tools/bench.py` (greedy, 768 output tokens, reasoning effort at its default, RTX
+5090, context limit 163,840 tokens). Decode tokens per second, in brackets the tokens kept per round:
+
+| Text the model writes | Short prompt | Behind 33K tokens | Behind 137K tokens |
+|---|---|---|---|
+| Prose (an essay) | 160 (2.5) | 217 (3.5) | 192 (3.5) |
+| Code (a module with tests) | 331 (5.2) | 349 (5.7) | 238 (4.5) |
+| Reasoning (a problem, step by step) | 451 (6.9) | 391 (6.4) | 323 (6.1) |
+
+Reading the long contexts cold: 9,170 tok/s for 33K tokens (3.6 s), 4,060 tok/s for 137K tokens (34 s). With the
+prefix in the cache the first token comes after 0.3 and 1.2 seconds.
+
+### More draft tokens per round
+
+The drafter was trained for blocks of 8 (7 draft tokens), but it keeps proposing useful tokens beyond that.
+`draft_tokens` raises the number. Each round then takes a little longer, and the KV cache needs a state per
+extra token, which costs context:
+
+| `draft_tokens` | Prose | Code | Reasoning | Rounds per second (short, 137K) | Largest context with all VRAM free |
+|---|---|---|---|---|---|
+| 7 (default) | 160, 217, 192 | 331, 349, 238 | 451, 391, 323 | 65, 54 | 262,144 |
+| 9 | 147, 206, 190 | 318, 298, 295 | 509, 461, 332 | 62, 53 | about 251,000 |
+| 11 | 155, 188, 176 | 381, 280, 254 | 527, 443, 403 | 61, 47 | about 240,000 |
+| 15 | 153, 216, 165 | 374, 300, 278 | 554, 461, 419 | 60, 46 | about 219,000 |
+
+The three numbers per cell are tok/s for a short prompt, behind 33K and behind 137K tokens. Reasoning gains 17 to
+30 percent with 11 or 15 draft tokens at every context size. Code gains with short prompts and varies behind long
+contexts (these are single runs; code differs between runs). Prose loses up to 14 percent, because it keeps few
+tokens anyway and the rounds get slower. The default stays 7: the largest context and the best speed for prose.
+
+### Measure it yourself
+
+```sh
+python tools/bench.py --markdown                 # about five minutes against http://127.0.0.1:8000
+python tools/bench.py --contexts 0 --repeats 3   # the short prompts only
+```
+
+The prompts are fixed and in the script. A row is marked when other requests ran on the server at the same time.
 
 ## Remove
 
@@ -226,11 +278,14 @@ change the installed vLLM on your machine.
 Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
 
 - **Windows**, with the release exe: uninstall, fresh setup into a new distribution, first start, benchmark,
-  stop; update from 1.0.0 to 1.1.0 without a click.
-- **Linux**, with the release file as a user without root rights, in a fresh Ubuntu 24.04: install, setup
-  (including the stop at the missing compiler and the restart after installing it), first start, benchmark,
-  stop by signal, uninstall. That Ubuntu ran inside WSL 2, because the test machine has no second operating
-  system: kernel, file system and Python are Linux, the GPU driver is the one of Windows.
+  stop (1.0.0); updates to 1.1.0 and 1.2.0 without a click; 1.2.0 with `draft_tokens` 15, including the two
+  LocalMaxxing runs.
+- **Linux**, with the release file of 1.1.0 as a user without root rights, in a fresh Ubuntu 24.04: install,
+  setup (including the stop at the missing compiler and the restart after installing it), first start,
+  benchmark, stop by signal, uninstall. That Ubuntu ran inside WSL 2, because the test machine has no second
+  operating system: kernel, file system and Python are Linux, the GPU driver is the one of Windows. For 1.2.0
+  the Linux file was not installed again: its engine scripts ran in a Linux environment for all measurements
+  above, and the unit tests pass on Linux.
 
 Not tested on a real machine: Linux on bare metal with the native NVIDIA driver; the window on a Linux desktop
 (only the terminal mode ran); distributions other than Ubuntu (the package manager commands for Fedora, Arch

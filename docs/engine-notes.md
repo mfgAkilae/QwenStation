@@ -70,7 +70,24 @@ with headers on every distribution.
 **Weights on the Linux filesystem.** Loading from a Windows drive through `/mnt` took about four minutes;
 from the distribution's own disk a start takes 45 to 80 seconds.
 
+**Seven draft tokens per round by default, more as an option** (`draft_tokens`, `SPEC_TOKENS`). vLLM takes the
+block size of the DFlash2 drafter from the setting, not from the checkpoint, so the drafter can be asked for more
+than the 7 tokens it was trained for. Its acceptance does not stop there: with 15 draft tokens, position 8 is
+still kept in 60 percent of the rounds of a reasoning text and position 15 in 14 to 38 percent. Measured
+2026-11-17 (short prompt, 33K, 137K; tok/s): reasoning 451, 391, 323 with 7 draft tokens, 527, 443, 403 with 11
+and 554, 461, 419 with 15. Prose keeps about 2.5 tokens per round either way and gets up to 14 percent slower.
+Two costs: a round verifies more tokens (65 rounds per second with 7, 60 with 15; behind 137K tokens 54 and 46),
+and every extra draft token needs one more state snapshot per Mamba layer in the KV pool, 0.16 GiB or about
+5,400 tokens of context. Qwen Station sizes the pool for the setting.
+
 ## Tried and dropped
+
+- **DSpark drafter** (`gittensor-model-hub/Qwen3.8-27B-DSpark-NVFP4`, trained against this very checkpoint). vLLM
+  0.32 has its own DSpark code and loads the drafter once the exclude patterns in its `hf_quant_config.json` start
+  with `*` (vLLM prefixes the layer names with `model.`, so `markov_head*` matches nothing and the unquantized
+  heads are built as NVFP4). It keeps fewer tokens per round than DFlash2 on every kind of text: prose 1.9
+  against 2.5, code 3.7 against 5.0, reasoning 5.3 against 6.9; in tok/s 122, 237 and 342 against 155, 302 and
+  424. More draft tokens do not help it, and neither does reasoning effort `low`.
 
 - **NVFP4 KV cache.** Loads only with the drafter's layers excluded, and then the prefix cache is unusable
   (block sizes 2,912 and 816 tokens only meet every 148,512 tokens).

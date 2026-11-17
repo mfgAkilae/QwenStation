@@ -1,3 +1,4 @@
+import tests.isolation  # noqa: F401  first of all: no test may reach the real agent configs
 import unittest
 
 from qwen_station import metrics

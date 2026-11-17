@@ -1,5 +1,6 @@
 """The native Linux mode and its release file. These tests run on Windows and Linux alike."""
 
+import tests.isolation  # noqa: F401  first of all: no test may reach the real agent configs
 import importlib.util
 import json
 import os

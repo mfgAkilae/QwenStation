@@ -173,6 +173,12 @@ td.dim { color: var(--ink-3); }
 .client[data-s="outdated"] svg, .client[data-s="missing"] svg { color: var(--warn); }
 .client b { font: 600 14px var(--display); }
 .client span { color: var(--ink-2); font-size: 12.5px; display: block; word-break: break-all; }
+#clients + .hint { margin-top: 14px; }
+.client small { color: var(--ink-2); font-size: 12.5px; display: block; margin-top: 2px; }
+.client small code, .state code { font: 12px var(--mono); color: var(--ink); }
+.row .state { margin-top: 5px; color: var(--ink-3); }
+.row .state[data-s="ok"] { color: var(--good); } .row .state[data-s="error"] { color: var(--bad); }
+.row .state[data-s="missing"], .row .state[data-s="outdated"] { color: var(--warn); }
 ol.how { margin: 14px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 13px; display: grid; gap: 5px; max-width: 62ch; }
 ol.how code { font: 12.5px var(--mono); color: var(--ink); }
 
@@ -352,13 +358,9 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
     </section>
 
     <section class="panel" aria-label="Connect">
-      <h2>Connect to T3 Code</h2>
+      <h2>Use it in your coding agents</h2>
       <div class="clients" id="clients"></div>
-      <ol class="how">
-        <li>In T3 Code, choose <b>OpenCode</b> or <b>Pi</b> as the provider.</li>
-        <li>Select the model <code id="slug">vllm/qwen38-gittensor-dflash</code>. If Pi does not list it, open Settings, Providers, Pi and add it as a custom model with exactly this slug.</li>
-        <li>Set reasoning to <code>low</code>, <code>medium</code> or <code>xhigh</code>. This checkpoint does not support other levels.</li>
-      </ol>
+      <p class="hint">Reasoning: <code>low</code>, <code>medium</code> or <code>xhigh</code>; this checkpoint knows no other levels. Which agents get the model: Settings, Coding agents.</p>
     </section>
 
     <section class="panel" aria-label="Log">
@@ -373,6 +375,7 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
     <div class="sheet-nav" role="tablist" aria-orientation="vertical" aria-label="Areas">
       <button type="button" role="tab" id="tab-api" data-tab="api" aria-controls="pane-api"><b>API</b><span id="sumApi"></span></button>
       <button type="button" role="tab" id="tab-model" data-tab="model" aria-controls="pane-model"><b>Model</b><span id="sumModel"></span></button>
+      <button type="button" role="tab" id="tab-agents" data-tab="agents" aria-controls="pane-agents"><b>Coding agents</b><span id="sumAgents"></span></button>
       <button type="button" role="tab" id="tab-app" data-tab="app" aria-controls="pane-app"><b>Window and app</b><span id="sumApp"></span></button>
       <button type="button" role="tab" id="tab-lab" data-tab="lab" aria-controls="pane-lab"><b>Experiments</b><span id="sumLab"></span></button>
       <p class="where" id="settingsFile"></p>
@@ -453,6 +456,15 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
       </div>
     </div>
 
+    <div class="sheet-pane" role="tabpanel" id="pane-agents" data-pane="agents" aria-labelledby="tab-agents" hidden>
+      <h3>Coding agents</h3>
+      <p class="lead">Qwen Station enters the model, its address and its context in the agents you switch on, now and at every start of the model. It only adds its own entry: everything else in their configs stays, and the first change keeps a backup next to the file. Switched off, an agent is no longer updated and keeps its entry.</p>
+      <div class="rows first" data-key="agents">
+        <div id="agentRows"></div>
+        <p class="err" hidden></p>
+      </div>
+    </div>
+
     <div class="sheet-pane" role="tabpanel" id="pane-app" data-pane="app" aria-labelledby="tab-app" hidden>
       <h3>Window and app</h3>
       <p class="lead">What Qwen Station itself does.</p>
@@ -463,10 +475,6 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
             <label><input type="radio" name="closeAction" value="stop"><span>Stop the model</span></label>
             <label><input type="radio" name="closeAction" value="keep"><span>Keep it running</span></label>
           </div>
-        </div>
-        <div class="row">
-          <div><label for="registerClients">Register the model in OpenCode and Pi</label><small>Writes the model, its address and its key into their configs at every start.</small></div>
-          <input class="switch" id="registerClients" type="checkbox" role="switch">
         </div>
         <div class="row" data-key="station_port">
           <div><label for="stationPort">Port of this dashboard</label><small>Applies the next time Qwen Station starts.</small></div>
@@ -865,16 +873,39 @@ function renderPositions(s) {
   barChart($("posChart"), rates);
 }
 
+// How to pick the model in each agent once it is entered. Plain text with code tags, no user data.
+const AGENT_HOW = {
+  t3code: "Choose OpenCode or Pi as the provider, then the model <code>vllm/qwen38-gittensor-dflash</code>.",
+  opencode: "Pick <code>vLLM RTX 5090</code> in the model list (<code>/models</code>).",
+  pi: "<code>/model</code>, then <code>vllm/qwen38-gittensor-dflash</code>.",
+  deepseek: "Pick <code>vLLM RTX 5090</code> in the model selector.",
+  copilot: "In the chat's model picker, under <code>Qwen Station</code>.",
+};
+// What each agent gets, for the settings.
+const AGENT_WHAT = {
+  t3code: "T3 Code runs OpenCode and Pi: switched on, it keeps their entries up to date, whether or not they are switched on themselves.",
+  opencode: "The provider vllm in opencode.json, with the reasoning levels this model knows. An API key is named by its file, not written in.",
+  pi: "The provider vllm in Pi's models.json.",
+  deepseek: "A provider of its own, qwen-station, in the desktop profile (cordis.patch.yml). An API key goes into its .env file, by name.",
+  copilot: "A Custom Endpoint group named Qwen Station in VS Code's chat models. VS Code keeps an API key itself and asks for it once.",
+};
+const AGENT_STATE = { ok: "Entered", outdated: "Entered at the next start of the model", missing: "Not on this computer; entered once it is installed",
+  error: "Could not be entered" };
 function renderClients(s) {
   const entries = Object.values(s.clients || {});
   const sig = JSON.stringify(entries);
   const box = $("clients");
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
-  if (!entries.length) { box.innerHTML = `<p class="hint">${s.station.mock ? "Mock mode does not touch any client configs." : "Checked at start."}</p>`; return; }
+  const chosen = entries.filter((c) => c.selected !== false);
+  if (!chosen.length) {
+    box.innerHTML = `<p class="hint">${s.station.mock ? "Mock mode does not touch any agent configs."
+      : entries.length ? "No agent is switched on." : "Checked at start."}</p>`;
+    return;
+  }
   const mark = { ok: "check", error: "x", outdated: "warn", missing: "warn" };
-  box.innerHTML = entries.map((c) => `<div class="client" data-s="${esc(c.status)}">${icon(mark[c.status] || "dot")}
-    <div><b>${esc(c.client)}</b>: ${esc(c.detail)}<span>${esc(c.path)}</span></div></div>`).join("");
+  box.innerHTML = chosen.map((c) => `<div class="client" data-s="${esc(c.status)}">${icon(mark[c.status] || "dot")}
+    <div><b>${esc(c.client)}</b>: ${esc(c.detail)}${c.status === "ok" && AGENT_HOW[c.id] ? `<small>${AGENT_HOW[c.id]}</small>` : ""}<span>${esc(c.path)}</span></div></div>`).join("");
 }
 
 /* ---------- log ---------- */
@@ -1123,7 +1154,13 @@ function updateSettings() {
     + ($("vision").checked ? ", vision" : "") + ($("ramCache").value > 0 ? `, ${$("ramCache").value} GiB RAM` : "")
     + ($("autostart").checked ? ", starts with the app" : "");
   $("sumApp").textContent = radio("closeAction") === "keep" ? "Closing keeps the model" : "Closing stops the model";
+  const on = chosenAgents(), all = settingsData.agents;
+  $("sumAgents").textContent = !on.length ? "None" : on.length === all.length ? "All " + all.length
+    : all.filter((agent) => on.includes(agent.id)).map((agent) => agent.label.replace(/ \(.*\)$/, "")).join(", ");
   $("sumLab").textContent = $("extraArgs").value.trim() || $("extraEnv").value.trim() ? "In use" : "Nothing set";
+}
+function chosenAgents() {
+  return [...sheet.querySelectorAll("[data-agent]")].filter((box) => box.checked).map((box) => box.dataset.agent);
 }
 function settingsError(key, message) {
   let hit = null;
@@ -1176,7 +1213,13 @@ function fillSettings(data) {
   $("fitContext").checked = v.fit_context;
   $("vision").checked = v.vision;
   $("autostart").checked = v.autostart;
-  $("registerClients").checked = v.register_clients;
+  $("agentRows").innerHTML = data.agents.map((agent) => {
+    const state = (data.clients || {})[agent.id];
+    const line = state && state.selected && AGENT_STATE[state.status]
+      ? `<small class="state" data-s="${esc(state.status)}">${esc(AGENT_STATE[state.status])}${state.status === "error" ? `: ${esc(state.detail)}` : ""}</small>` : "";
+    return `<div class="row"><div><label for="agent-${agent.id}">${esc(agent.label)}</label><small>${esc(AGENT_WHAT[agent.id] || "")}</small>${line}</div>
+      <input class="switch" id="agent-${agent.id}" data-agent="${agent.id}" type="checkbox" role="switch"${v.agents.includes(agent.id) ? " checked" : ""}></div>`;
+  }).join("");
   setRadio("closeAction", v.close_action);
   $("extraArgs").value = v.extra_args;
   $("extraEnv").value = v.extra_env;
@@ -1198,7 +1241,7 @@ async function saveSettings() {
   const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens"), slots: whole("slots"), ram_cache_gib: whole("ramCache") };
   for (const [key, value] of Object.entries(numbers)) if (value === null) { settingsError(key, "Enter a whole number."); return; }
   const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked, vision: $("vision").checked,
-    autostart: $("autostart").checked, register_clients: $("registerClients").checked, close_action: radio("closeAction"),
+    autostart: $("autostart").checked, agents: chosenAgents(), close_action: radio("closeAction"),
     extra_args: $("extraArgs").value, extra_env: $("extraEnv").value };
   let result;
   try { result = await api("/api/settings", { values }); } catch (error) { settingsError("", `The settings could not be saved: ${error.message}`); return; }

@@ -38,6 +38,8 @@ MAX_SLOTS = 4
 # Sessions in RAM (GiB): what leaves the KV pool on the GPU is kept there and copied back. About 3.5 GiB per
 # 100K tokens (measured: 4.03 GB copied back for 117,008 tokens).
 MAX_RAM_CACHE_GIB = 128
+# The coding agents the model can be entered in, in the order the settings show them (labels in clients.py).
+AGENT_IDS = ("t3code", "opencode", "pi", "deepseek", "copilot")
 LOCAL_HOST = "127.0.0.1"  # the API answers this machine only
 ANY_HOST = "0.0.0.0"      # the API listens on every network interface
 API_KEY_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{8,128}")  # what fits into an Authorization header as it is
@@ -93,7 +95,8 @@ class Config:
     close_action: str = "stop"  # "stop": closing the window stops the model. "keep": only "Quit" does.
     gpu_match: str = "5090"
     gpu_memory_utilization: float = 0.92
-    register_clients: bool = True
+    register_clients: bool = True  # off: no agent config is touched at all (--no-register-clients)
+    agents: list = field(default_factory=lambda: list(AGENT_IDS))  # where the model is entered; only adds
     open_window: bool = True
     fit_context: bool = True  # shrink the context when too little VRAM is free, instead of paging
     draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
@@ -148,6 +151,9 @@ class Config:
             raise ValueError(f"ram_cache_gib must be a number from 0 to {MAX_RAM_CACHE_GIB}")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
+        if not isinstance(self.agents, list) or any(agent not in AGENT_IDS for agent in self.agents) \
+                or len(set(self.agents)) != len(self.agents):
+            raise ValueError(f"agents must be a list of: {', '.join(AGENT_IDS)}")
         if self.api_host:
             try:
                 ipaddress.IPv4Address(self.api_host)
@@ -224,6 +230,7 @@ _FILE_KEYS = {
     "gpu_match": str,
     "gpu_memory_utilization": float,
     "register_clients": bool,
+    "agents": list,
     "open_window": bool,
     "fit_context": bool,
     "draft_tokens": int,
@@ -285,6 +292,9 @@ def load_config(explicit_path: str | None = None, overrides: dict | None = None)
         if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
             raise ValueError(f"{path}: '{key}' has the wrong type")
         setattr(config, key, value)
+    if file_values.get("register_clients") is False and "agents" not in file_values:
+        # Up to 1.7.0 one switch covered OpenCode and Pi. Off meant no agent; the selection says that now.
+        config.agents, config.register_clients = [], True
     root_from_file = "root" in file_values
     for key, value in (overrides or {}).items():
         if value is not None:

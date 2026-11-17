@@ -13,8 +13,8 @@ import subprocess
 import threading
 import time
 
-from .config import (ANY_HOST, API_KEY_PATTERN, DEFAULT_DRAFT_TOKENS, LOCAL_HOST, MAX_DRAFT_TOKENS, MAX_RAM_CACHE_GIB,
-                     MAX_SLOTS, Config)
+from .config import (AGENT_IDS, ANY_HOST, API_KEY_PATTERN, DEFAULT_DRAFT_TOKENS, LOCAL_HOST, MAX_DRAFT_TOKENS,
+                     MAX_RAM_CACHE_GIB, MAX_SLOTS, Config)
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -22,14 +22,14 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "vision", "slots", "ram_cache_gib", "fit_context",
               "extra_args", "extra_env")
 # Read all the time: a change applies at once.
-APP_KEYS = ("autostart", "close_action", "register_clients")
+APP_KEYS = ("autostart", "close_action", "agents")
 # The dashboard's own port: the running app keeps it until it is started again.
 RESTART_KEYS = ("station_port",)
 EDITABLE = MODEL_KEYS + APP_KEYS + RESTART_KEYS
 
 KINDS = {"api_host": str, "api_port": int, "api_key": str, "station_port": int, "draft_tokens": int,
          "fit_context": bool, "vision": bool, "slots": int, "ram_cache_gib": int,
-         "extra_args": str, "extra_env": str, "autostart": bool, "close_action": str, "register_clients": bool}
+         "extra_args": str, "extra_env": str, "autostart": bool, "close_action": str, "agents": list}
 MIN_PORT = 1024
 MAX_TEXT = 2000
 
@@ -42,6 +42,7 @@ def values(config: Config) -> dict:
     """The editable settings as the running app uses them."""
     current = {key: getattr(config, key) for key in EDITABLE}
     current["api_host"] = config.bind_host  # the older "lan" switch shows up as its address
+    current["agents"] = list(config.agents)
     return current
 
 
@@ -187,6 +188,10 @@ def validate(config: Config, current: dict, changes: dict, addresses: list[dict]
         return {}, f"Between 0 (off) and {MAX_RAM_CACHE_GIB} GiB.", "ram_cache_gib"
     if merged["close_action"] not in ("stop", "keep"):
         return {}, "Choose what happens when the window closes.", "close_action"
+    agents = merged["agents"]
+    if any(agent not in AGENT_IDS for agent in agents) or len(set(agents)) != len(agents):
+        return {}, "Choose agents from the list.", "agents"
+    merged["agents"] = [agent for agent in AGENT_IDS if agent in agents]  # one order, so a save compares equal
     for key in ("extra_args", "extra_env"):
         if len(merged[key]) > MAX_TEXT or "\n" in merged[key] or "\r" in merged[key]:
             return {}, f"One line, at most {MAX_TEXT} characters.", key

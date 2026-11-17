@@ -1,3 +1,4 @@
+import tests.isolation  # noqa: F401  first of all: no test may reach the real agent configs
 import json
 import os
 import sys

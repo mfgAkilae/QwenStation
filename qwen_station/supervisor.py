@@ -728,7 +728,7 @@ class Supervisor:
         result = clients.register_all(self.config.api_base_url, preset["context"], self.config.slots,
                                       dry_run=not write, variant=preset.get("variant", ""),
                                       api_key=self.config.api_key, key_file=data_dir() / KEY_FILE,
-                                      vision=self.config.vision)
+                                      vision=self.config.vision, agents=self.config.agents)
         for entry in result.values():
             if entry.get("changed"):
                 self.log.add(f"--- {entry['client']}: model {entry['model']} {entry['detail']} ({entry['path']})", "step")

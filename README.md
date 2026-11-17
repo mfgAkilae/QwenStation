@@ -20,8 +20,8 @@ file. Steps for [Windows](#install-on-windows) and for [Linux](#install-on-linux
 | **Several requests at once** | Up to 4 slots that share the context. Four requests together reach about 1,370 tok/s. [Several requests at once](#several-requests-at-once) |
 | **Large sessions that take turns** | Kept in RAM, a session that another one pushed out of the GPU comes back in 1 second instead of 27. Made for two agents with 120,000 tokens each. [Sessions in RAM](#sessions-in-ram) |
 | **Vision** | Optional: up to 4 images per request. [Vision](#vision) |
-| **Coding agents, ready to use** | OpenCode and Pi get the model at every start, with the right context size. T3 Code uses it through them. [Use](#use) |
-| **One settings window** | Network, API key, slots, RAM, vision and draft tokens in one place. There is a settings file and there are command line options too. [Settings](#settings) |
+| **Your choice of coding agent** | T3 Code, OpenCode, Pi, DeepSeek Harness and Copilot in VS Code get the model with the right context size. You choose which in the settings; Qwen Station only adds its own entry to their configs. [Coding agents](#coding-agents) |
+| **One settings window** | Network, API key, slots, RAM, vision, draft tokens and the coding agents in one place. There is a settings file and there are command line options too. [Settings](#settings) |
 | **Stays out of your system** | On Windows it runs in a WSL distribution of its own, on Linux in one folder of your user. Both can be removed completely. [Remove](#remove) |
 
 ## What is inside
@@ -127,13 +127,40 @@ In a test on Ubuntu 24.04 the setup took 6 minutes on a 35 MB/s connection and u
 
 ## Use
 
-- **OpenCode and Pi:** the app registers the model at every start (`~/.config/opencode/opencode.json` and
-  `~/.pi/agent/models.json`, provider `vllm`). Before its first change it writes a backup next to the file.
-- **T3 Code:** choose the provider OpenCode or Pi and the model `vllm/qwen38-gittensor-dflash`. If Pi does
-  not list it, add it as a custom model with exactly this slug.
-- **Other clients:** base URL `http://127.0.0.1:8000/v1`, any API key (for example `local`). If you set an
-  API key in the settings, clients must send that one.
-- **Reasoning effort:** `low`, `medium` or `xhigh`. This checkpoint knows no other levels.
+### Coding agents
+
+Qwen Station enters the model in the coding agents you choose, at every start of the model and right after you
+change the choice: **Settings, Coding agents**. By default all five are switched on, and the ones that are not on
+the computer are skipped. The setup asks nothing about it, so it stays one click.
+
+| Agent | What Qwen Station writes | Where you pick the model |
+|---|---|---|
+| **T3 Code** | Nothing of its own: T3 Code runs OpenCode and Pi, so it keeps their entries up to date, even when those two are switched off | Provider OpenCode or Pi, model `vllm/qwen38-gittensor-dflash` |
+| **OpenCode** | Provider `vllm` in `~/.config/opencode/opencode.json`, with the reasoning levels this model knows | `/models`, `vLLM RTX 5090` |
+| **Pi** | Provider `vllm` in `~/.pi/agent/models.json` | `/model`, `vllm/qwen38-gittensor-dflash` |
+| **DeepSeek Harness** | Provider `qwen-station` in the desktop profile, `~/.dsh/profiles/desktop/cordis.patch.yml` | Model selector, `vLLM RTX 5090` |
+| **Copilot in VS Code** | A "Custom Endpoint" group `Qwen Station` in `chatLanguageModels.json` of VS Code's user folder (also VS Code Insiders) | Chat model picker, under `Qwen Station` |
+
+Every entry carries the address, the context the model really has, the output limit, whether it takes images,
+and the reasoning levels `low`, `medium` and `xhigh`.
+
+- **It only adds.** Qwen Station writes its own entry and leaves everything else in these files as it is, comments
+  in DeepSeek Harness's YAML included. Before its first change to a file it keeps a backup next to it
+  (`<file>.bak-station-<date>`). DeepSeek Harness and Copilot get a provider of their own, so an update never
+  touches one you made. Switching an agent off stops the updates; its entry stays where it is.
+- **A config that holds a plain-text secret** (OpenCode) or that Qwen Station cannot read safely (YAML written in
+  flow style) is not changed; the dashboard says so.
+- **API key:** OpenCode gets a reference to a file that holds it, Pi the key itself. DeepSeek Harness finds keys
+  by name: its provider names `QWEN_STATION_API_KEY`, and Qwen Station puts that line into `~/.dsh/.env` (the
+  placeholder `local` without a key, as DeepSeek Harness refuses a provider without one). VS Code keeps keys
+  itself: enter the key once under Chat, Manage Models.
+- The panel **Use it in your coding agents** in the window shows the state of every agent you switched on.
+
+### Other clients
+
+- Base URL `http://127.0.0.1:8000/v1`, any API key (for example `local`). If you set an API key in the settings,
+  clients must send that one.
+- Reasoning effort: `low`, `medium` or `xhigh`. This checkpoint knows no other levels.
 - vLLM rejects `min_p` and `logit_bias` with HTTP 400 while speculative decoding is active.
 
 Closing the window stops the model and frees the VRAM. A minimized window keeps it running. Starting the
@@ -164,7 +191,7 @@ sessions, and Windows starts paging GPU memory about 0.65 GiB before the card is
 | 30.9 GiB | 229,376 |
 | 29.9 GiB | 196,608 |
 | 28.9 GiB | 163,840 |
-| each GiB less | 32,768 tokens less. The window says so, and OpenCode and Pi get the smaller limit. |
+| each GiB less | 32,768 tokens less. The window says so, and the coding agents get the smaller limit. |
 | too little for 65,536 tokens (25.7 GiB) | No automatic start. The window lists the programs that hold the most GPU memory. |
 
 On Windows the card never has 31.9 GiB free, so the largest context there is 229,376 tokens, with a card that
@@ -200,9 +227,10 @@ The **Settings** button in the window opens them:
 - **Requests at the same time:** 1 to 4 slots, see [Several requests at once](#several-requests-at-once).
 - **Sessions kept in RAM:** a large session that another one pushed out of the GPU comes back in a second
   instead of being read again, see [Sessions in RAM](#sessions-in-ram).
+- **Coding agents:** which agents get the model, see [Coding agents](#coding-agents). A change applies at once.
 - The API port, draft tokens per round, the automatic context reduction, the start of the model with the app,
-  what happens when the window closes, the registration in OpenCode and Pi, the port of the dashboard, and
-  extra arguments and environment for experiments.
+  what happens when the window closes, the port of the dashboard, and extra arguments and environment for
+  experiments.
 
 The areas on the left show the current state at a glance. Changes to the API and the model apply when the model
 starts; while it runs, the window offers to restart it. The port of the dashboard applies the next time Qwen
@@ -212,8 +240,8 @@ What the key does and does not protect: vLLM checks it for everything below `/v1
 list). The metrics and the health check stay open, which is how the dashboard reads them. The key travels in
 clear text, as the API speaks plain HTTP: use it on networks you trust or behind a VPN, not across the internet.
 The app has to keep the key to start the server with it, so it stays in the settings file, readable for your
-user account. The server gets it through its environment, never on a command line. OpenCode's config gets a
-reference to a file that holds the key (`api-key` next to the settings file), Pi's config the key itself.
+user account. The server gets it through its environment, never on a command line. How each coding agent
+gets it is under [Coding agents](#coding-agents); for OpenCode it is the file `api-key` next to the settings file.
 
 - **Windows:** the model runs inside WSL, which Windows reaches at `127.0.0.1` only. For other devices the app
   itself listens on the chosen address and passes connections on. Windows asks for administrator rights once,
@@ -237,6 +265,7 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   "fit_context": true,
   "api_port": 8000,
   "station_port": 8010,
+  "agents": ["t3code", "opencode", "pi", "deepseek", "copilot"],
   "extra_args": "",
   "extra_env": ""
 }
@@ -249,6 +278,8 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   [Several requests at once](#several-requests-at-once).
 - `ram_cache_gib`: how many GiB of RAM hold sessions that left the GPU, 0 (default, off) to 128. See
   [Sessions in RAM](#sessions-in-ram).
+- `agents`: the coding agents that get the model, any of `t3code`, `opencode`, `pi`, `deepseek` and `copilot`
+  (default: all). `[]` touches no agent. The older switch `register_clients: false` means `[]`.
 - `close_action`: `stop` ends the model when the window closes, `keep` leaves it running until **Quit**.
 - `api_host`: `127.0.0.1` (default), `0.0.0.0` or one IPv4 address of this computer, as described above.
   The older switch `lan: true` still works and means `0.0.0.0`.
@@ -264,7 +295,8 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 The same values work as command line options: `Qwen-Station.exe --preset 237k --keep --no-autostart`, on Linux
 `qwen-station --preset 237k --no-autostart`. `--check` prints the state of the installation as JSON and exits.
 `--setup` starts a needed setup without the click, `--location` names its folder. `--api-host 0.0.0.0` sets
-the address of the API for one run.
+the address of the API for one run, `--agents opencode,pi` the coding agents, and `--no-register-clients` leaves
+every agent alone.
 
 ## Speed
 
@@ -331,7 +363,7 @@ What it costs:
 
 In a test the model named the colours and positions in a generated picture, kept two images apart in their
 order, and read the speed, the GPU and the VRAM figure off a screenshot of the dashboard. With vision on, the
-entries for OpenCode and Pi say that the model takes images.
+entries of the coding agents say that the model takes images.
 
 ### Several requests at once
 
@@ -457,7 +489,7 @@ file is an AppImage: the same Python package and a standalone Python 3.12, behin
 | `qwen_station/supervisor.py` | Preflight, start of the server (inside WSL or directly), startup phases from the log, stop |
 | `qwen_station/metrics.py` | Parses `/metrics`; speed and request rows from counter differences |
 | `qwen_station/gpu.py` | `nvidia-smi` readings, GPU memory per Windows process |
-| `qwen_station/clients.py` | Entries for OpenCode and Pi |
+| `qwen_station/clients.py` | The entries in the coding agents; only adds, and edits DeepSeek Harness's YAML as text, as the app has no YAML library |
 | `qwen_station/dashboard.html` | The dashboard: one file, no external resources |
 | `qwen_station/engine/provision.sh` | Installs the engine below one prefix. Idempotent, also runs on native Linux. |
 | `qwen_station/engine/serve.sh` | Starts `vllm serve` with the tested settings |
@@ -515,6 +547,12 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   context chosen at 29.1 GiB free (163,840), a session of 152K tokens (405 tok/s), 4 slots through the
   settings with four requests at once (1,385 to 1,405 tok/s together), and requests sent at the moment the
   app reports "Ready".
+- **Coding agents (1.8.0)**, on Windows: the entries of all five agents into temporary copies of real configs
+  (unit tests with the formats as the agents write them, including DeepSeek Harness's YAML with comments and
+  other providers); DeepSeek Harness composing a copy of a real desktop profile with the new provider
+  (`dsh --dump-config`) and answering a request through it with the real model (`dsh headless`); the request
+  Copilot's entry makes, with a tool call, against the real model; the settings tab against the real configs
+  without saving.
 - **Sessions in RAM (1.7.0)**, on Windows with the real model. In a development distribution: the patch
   applied to an unchanged vLLM, two sessions of 119K tokens in turns, two conversations of 109K tokens that
   grow turn by turn, 2 slots with 15 draft tokens (two sessions of 94K and three of 59K in turns, two short
@@ -540,7 +578,9 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
 
 Not tested: the AppImage of 1.4.0 was built and started but not installed again from scratch; the settings
 window in a real browser with a person clicking; a single address as the final setting on Windows (the firewall
-rule for it); going back to "this computer only" (the removal of the rule); OpenCode and Pi actually talking to
+rule for it); going back to "this computer only" (the removal of the rule); Copilot Chat in VS Code and the
+desktop app of DeepSeek Harness actually using the model (only the request shape and the harness's command line
+ran); an API key in DeepSeek Harness and VS Code; OpenCode and Pi actually talking to
 the model with a key set.
 
 Not tested on a real machine: Linux on bare metal with the native NVIDIA driver; the double-click in a file

@@ -22,9 +22,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__, installer, metrics
-from .config import (MODEL_ID, MODEL_SUBTITLE, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
+from .config import (AGENT_IDS, MODEL_ID, MODEL_SUBTITLE, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
                      resource_path)
-from . import settings
+from . import clients, settings
 from .config import save_settings, settings_path
 from .gpu import GpuMonitor
 from .setup import make_setup, uninstall_message
@@ -192,6 +192,8 @@ class Station:
                 "addresses": settings.local_addresses(), "primary": settings.primary_address(),
                 "running": self._model_busy(), "platform": self.setup.platform, "mode": self.config.mode,
                 "model": MODEL_ID,
+                "agents": [{"id": agent, "label": clients.AGENTS[agent]} for agent in clients.AGENT_IDS],
+                "clients": self.supervisor.clients,
                 "file": "" if self.config.mock else str(self.settings_file),
                 "limits": {"draft_tokens": [settings.DEFAULT_DRAFT_TOKENS, settings.MAX_DRAFT_TOKENS],
                            "slots": [1, settings.MAX_SLOTS],
@@ -229,7 +231,14 @@ class Station:
             if changed:
                 self.supervisor.log.add("--- Settings saved: " + ", ".join(sorted(changed)), "step")
             return {"ok": True, "changed": sorted(changed), "pending": sorted(self.pending),
-                    "after_restart": sorted(self.after_restart)}
+                    "after_restart": sorted(self.after_restart), "clients": self._agents_changed(changed)}
+
+    def _agents_changed(self, changed: dict) -> dict:
+        """A new agent selection applies at once: the chosen agents get the model now, not at the next start."""
+        if "agents" not in changed or self.config.mock or not self.config.register_clients:
+            return self.supervisor.clients
+        self.supervisor.refresh_clients(write=True)
+        return self.supervisor.clients
 
     def apply_pending(self) -> None:
         """Called before every start of the model: the settings saved while it ran now take effect."""
@@ -611,7 +620,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-autostart", action="store_false", dest="autostart", default=None)
     parser.add_argument("--no-window", action="store_false", dest="open_window", default=None)
     parser.add_argument("--no-register-clients", action="store_false", dest="register_clients", default=None,
-                        help="Leave the OpenCode and Pi entries alone (for experiments)")
+                        help="Leave the configs of all coding agents alone (for experiments)")
+    parser.add_argument("--agents", type=lambda text: [part for part in text.split(",") if part],
+                        help="Coding agents to enter the model in, comma-separated: " + ",".join(AGENT_IDS))
     parser.add_argument("--no-fit-context", action="store_false", dest="fit_context", default=None,
                         help="Do not shrink the context automatically when VRAM is short")
     parser.add_argument("--ram-cache-gib", type=int, dest="ram_cache_gib",
@@ -659,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
                       "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "ram_cache_gib",
-                      "register_clients")}
+                      "register_clients", "agents")}
         config = load_config(args.config, overrides)
         if config.mock:
             if args.api_port is None:

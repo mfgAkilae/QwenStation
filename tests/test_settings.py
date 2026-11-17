@@ -1,5 +1,6 @@
 """The settings menu: validation, when a change takes effect, and the address the API listens on."""
 
+import tests.isolation  # noqa: F401  first of all: no test may reach the real agent configs
 import json
 import os
 import socket
@@ -116,7 +117,8 @@ class TempData(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def station(self, **overrides):
-        config = Config(mode="managed", autostart=False, open_window=False, register_clients=False, **overrides)
+        config = Config(**{"mode": "managed", "autostart": False, "open_window": False, "register_clients": False,
+                           **overrides})
         return Station(config, Supervisor(config, MockLauncher(config)))
 
     def saved(self):
@@ -128,7 +130,7 @@ class SavingTests(TempData):
         station = self.station()
         result = station.save_settings({"api_host": "0.0.0.0", "draft_tokens": 11, "close_action": "keep"})
         self.assertEqual(result, {"ok": True, "changed": ["api_host", "close_action", "draft_tokens"], "pending": [],
-                                  "after_restart": []})
+                                  "after_restart": [], "clients": {}})
         self.assertEqual((station.config.api_host, station.config.draft_tokens, station.config.close_action),
                          ("0.0.0.0", 11, "keep"))
         self.assertEqual(self.saved(), {"api_host": "0.0.0.0", "draft_tokens": 11, "close_action": "keep"})
@@ -308,8 +310,8 @@ class ApiKeyTests(TempData):
         opencode, pi = self.home / "opencode.json", self.home / "pi" / "models.json"
         pi.parent.mkdir()
         result = clients.register_all("http://127.0.0.1:8000/v1", 262144, 1, opencode_file=opencode, pi_file=pi,
-                                      api_key=self.KEY, key_file=key_file)
-        self.assertEqual([entry["status"] for entry in result.values()], ["ok", "ok"])
+                                      api_key=self.KEY, key_file=key_file, agents=["opencode", "pi"])
+        self.assertEqual([result["opencode"]["status"], result["pi"]["status"]], ["ok", "ok"])
         self.assertEqual(key_file.read_text(encoding="ascii"), self.KEY)
         written = opencode.read_text(encoding="utf-8")
         self.assertNotIn(self.KEY, written)  # the config names the file, it does not hold the secret
@@ -320,7 +322,7 @@ class ApiKeyTests(TempData):
         # A second run must not stumble over its own entry (configs with plain secrets are not rewritten).
         again = clients.register_all("http://127.0.0.1:8000/v1", 262144, 1, opencode_file=opencode, pi_file=pi,
                                      api_key=self.KEY, key_file=key_file)
-        self.assertEqual([entry["detail"] for entry in again.values()], ["registered", "registered"])
+        self.assertEqual([again["opencode"]["detail"], again["pi"]["detail"]], ["registered", "registered"])
 
     def test_removing_the_key_takes_it_out_of_the_configs_and_deletes_the_file(self):
         key_file = self.home / "api-key"
@@ -560,6 +562,47 @@ class RamCacheTests(TempData):
         station.supervisor.before_start()
         self.assertTrue(station.state_json()["model"]["subtitle"].endswith(", 24 GiB of RAM for sessions"))
         self.assertEqual(load_config(str(station.settings_file)).ram_cache_gib, 24)
+
+
+class AgentSettingTests(TempData):
+    """Which coding agents get the model: chosen in the settings, applied at once."""
+
+    def test_by_default_every_agent_is_chosen(self):
+        self.assertEqual(Config().agents, list(config_module.AGENT_IDS))
+        self.assertEqual(settings.values(Config())["agents"], list(config_module.AGENT_IDS))
+
+    def test_only_known_agents_once_each(self):
+        config = Config()
+        for agents in (["cursor"], ["pi", "pi"], "pi", [1]):
+            self.assertEqual(settings.validate(config, settings.values(config), {"agents": agents}, [])[2], "agents")
+        with self.assertRaises(ValueError):
+            Config(agents=["cursor"]).validate()
+        merged = settings.validate(config, settings.values(config), {"agents": ["copilot", "pi"]}, [])[0]
+        self.assertEqual(merged["agents"], ["pi", "copilot"])  # the order of the list, whatever the page sends
+
+    def test_a_new_choice_applies_at_once_also_while_the_model_runs(self):
+        station = self.station(register_clients=True)
+        station.supervisor.state = "ready"
+        with mock.patch.object(station.supervisor, "refresh_clients") as refresh:
+            result = station.save_settings({"agents": ["pi"]})
+        self.assertEqual((result["changed"], result["pending"]), (["agents"], []))
+        self.assertEqual(station.config.agents, ["pi"])
+        refresh.assert_called_once_with(write=True)
+        self.assertEqual(self.saved(), {"agents": ["pi"]})
+        with mock.patch.object(station.supervisor, "refresh_clients") as refresh:
+            station.save_settings({"close_action": "keep"})
+        refresh.assert_not_called()  # other settings do not touch the agents
+        labels = [agent["label"] for agent in station.settings_json()["agents"]]
+        self.assertEqual(labels, ["T3 Code", "OpenCode", "Pi", "DeepSeek Harness", "Copilot (VS Code)"])
+
+    def test_the_old_switch_off_means_no_agent(self):
+        path = self.home / "old.json"
+        path.write_text(json.dumps({"register_clients": False}), encoding="utf-8")
+        loaded = load_config(str(path))
+        self.assertEqual((loaded.agents, loaded.register_clients), ([], True))
+        path.write_text(json.dumps({"register_clients": False, "agents": ["pi"]}), encoding="utf-8")
+        self.assertEqual(load_config(str(path)).agents, ["pi"])
+        self.assertFalse(load_config(str(path), {"register_clients": False}).register_clients)  # the CLI switch
 
 
 class RelayTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 """End-to-end against the scripted mock server: real subprocess, real HTTP, no GPU."""
 
+import tests.isolation  # noqa: F401  first of all: no test may reach the real agent configs
 import json
 import os
 import socket

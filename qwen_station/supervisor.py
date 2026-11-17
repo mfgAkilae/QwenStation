@@ -61,6 +61,9 @@ FIT_RESERVE_GIB = 22.0
 # Linux has no such paging: the card can be used to its end, and a server that needs more fails at once.
 # Not measured on a Linux machine; the 0.15 GiB kept of the 0.65 are for that.
 LINUX_RESERVE_RELIEF_GIB = 0.5
+# Linux: vLLM finds about this much less free than the preflight did, as its own processes start first (reported
+# on NixOS 2026-11-17: 26.4 GiB measured, 25.85 GiB at vLLM's check). The share it is asked for leaves it out.
+NATIVE_START_MARGIN_MIB = 1024
 # What vision adds to that. Measured 2026-11-17: the image encoder's weights take 0.86 GiB (vLLM reports
 # 18.88 instead of 18.02 GiB for the model), and reading the largest image (16.7 million pixels, 16,384 tokens)
 # needs another 0.75 GiB for a moment, a 4K screenshot 0.54 GiB. Without this reserve the card ran full with a
@@ -397,6 +400,7 @@ class NativeLauncher(ManagedLauncher):
 
     host_label = "System"
     gpu_index: int | None = None  # set by the preflight: the card that matched, in PCI bus order
+    card: dict | None = None  # set by the preflight: that card's row, free and total VRAM in MiB
 
     def server_host(self) -> str:
         return self.config.bind_host  # no forwarding in between: the server binds the address itself
@@ -409,9 +413,24 @@ class NativeLauncher(ManagedLauncher):
 
     def command(self, preset: dict) -> list[str]:
         command = super().command(preset)  # ["env", KEY=VALUE ..., "bash", serve.sh]
+        command = [part for part in command if not part.startswith("GPU_UTIL=")]
+        utilization = self.gpu_utilization()
+        if abs(utilization - 0.92) > 1e-9:
+            command.insert(1, f"GPU_UTIL={utilization}")
         if self.gpu_index is not None:
             command.insert(1, f"GPU_INDEX={self.gpu_index}")
         return command
+
+    def gpu_utilization(self) -> float:
+        """vLLM checks at its start that this share of the card is free, even with a KV pool of a fixed size (its
+        only use then). Under WSL nearly the whole card counts as free; on Linux the desktop's share does not.
+        So the share follows the free VRAM the preflight measured, less what vLLM's own start takes first."""
+        utilization = self.config.gpu_memory_utilization
+        card = self.card
+        if card and card.get("mem_total") and card.get("mem_free") is not None:
+            fits = math.floor((card["mem_free"] - NATIVE_START_MARGIN_MIB) / card["mem_total"] * 100) / 100
+            utilization = min(utilization, max(fits, 0.05))
+        return utilization
 
     def distro_check(self) -> tuple[bool, str]:
         return True, f"{platform.system()} {platform.release()}"
@@ -571,6 +590,7 @@ class Supervisor:
                 row = gpu.pick(gpu.query_once(), self.config.gpu_match)
                 if row and isinstance(self.launcher, NativeLauncher):
                     self.launcher.gpu_index = row.get("index")
+                    self.launcher.card = row
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 row = None
                 checks.append({"id": "vram", "label": "Free VRAM", "ok": False, "blocking": False,

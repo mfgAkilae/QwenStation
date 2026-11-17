@@ -117,10 +117,11 @@ An AppImage mounts itself with FUSE (`fusermount`), which desktop distributions 
 (containers, minimal servers) the start says so; start the file once with `--appimage-extract-and-run` as its
 first option instead. The installed app does not need FUSE.
 
-**NixOS** (not tested by us): an AppImage runs there through `appimage-run`, and the NVIDIA driver is not in the
-library folders that the setup and the prebuilt packages expect. Without it the setup stops at "CUDA compiler"
-with "libcuda.so of the NVIDIA driver is missing". A NixOS user reported that the setup finds the driver with
-this configuration:
+**NixOS** (not tested by us): an AppImage runs there through `appimage-run` (`programs.appimage` with
+`enable = true;` and `binfmt = true;`). Since 2.1.1 the setup also finds the NVIDIA driver below
+`/run/opengl-driver/lib`, where NixOS keeps it; a NixOS user ran the setup and the model with a test build of
+2.1.1. If the setup still stops at "CUDA compiler" with "libcuda.so of the NVIDIA driver is missing", give
+`appimage-run` the driver package, as that user did before:
 
 ```nix
 programs.appimage = {
@@ -672,6 +673,8 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   each with sessions in RAM and without, and against first come, first served.
 - **No coding agent by default (2.1.0)**, unit tests: a first start on a computer with all five agents writes no
   file of theirs; settings from 2.0.0 keep the agents that already have the model.
+- **Linux beside a desktop (2.1.1)**, reported by a NixOS user with test builds: the setup with the driver below
+  `/run/opengl-driver/lib`, the start of the model on a card that also runs the desktop, and requests from VS Code.
 - **Coding agents (1.8.0)**, on Windows: the entries of all five agents into temporary copies of real configs
   (unit tests with the formats as the agents write them, including DeepSeek Harness's YAML with comments and
   other providers); DeepSeek Harness composing a copy of a real desktop profile with the new provider
@@ -708,7 +711,8 @@ desktop app of DeepSeek Harness actually using the model (only the request shape
 ran); an API key in DeepSeek Harness and VS Code; OpenCode and Pi actually talking to
 the model with a key set.
 
-Not tested on a real machine: Linux on bare metal with the native NVIDIA driver; the double-click in a file
+Not tested on a real machine: Linux on bare metal with the native NVIDIA driver, beyond that one report from
+NixOS; the double-click in a file
 manager and the window on a Linux desktop (only the terminal mode ran); distributions other than Ubuntu (the
 bundled Python is built for glibc 2.17 and newer, the package manager commands for Fedora, Arch and openSUSE are
 untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a faked WSL only);

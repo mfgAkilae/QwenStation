@@ -106,9 +106,17 @@ step_cuda() {
     name=$(basename "$lib")
     [ -e "$sdk/lib/${name%%.so.*}.so" ] || ln -s "$name" "$sdk/lib/${name%%.so.*}.so"
   done
-  # libcuda belongs to the GPU driver: WSL mounts it, a native Linux has it in the system library folder.
-  driver=$(ls /usr/lib/wsl/lib/libcuda.so /usr/lib/wsl/lib/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so \
-    /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib64/libcuda.so.1 2>/dev/null | head -1)
+  # libcuda belongs to the GPU driver: WSL mounts it, a native Linux has it in the system library folder (Arch:
+  # /usr/lib), NixOS below /run/opengl-driver/lib. Last, whatever the loader's cache knows.
+  driver=""
+  for lib in /usr/lib/wsl/lib/libcuda.so /usr/lib/wsl/lib/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so \
+      /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib64/libcuda.so.1 /usr/lib/libcuda.so.1 \
+      /run/opengl-driver/lib/libcuda.so.1; do
+    if [ -e "$lib" ]; then driver=$lib; break; fi
+  done
+  if [ -z "$driver" ]; then
+    driver=$( (ldconfig -p || /sbin/ldconfig -p) 2>/dev/null | awk '$1 == "libcuda.so.1" && /x86-64/ { print $NF; exit }')
+  fi
   if [ -z "$driver" ]; then say "libcuda.so of the NVIDIA driver is missing. Is the driver installed?"; return 1; fi
   ln -sfn "$driver" "$sdk/lib/libcuda.so"
 }

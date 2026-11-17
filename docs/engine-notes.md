@@ -132,6 +132,16 @@ arguments last and the last one wins, so the engine needs no change. Two things 
 The DFlash2 drafter is text-only; vLLM says so at the start ("Embeddings from the target model will not be
 passed to the drafter") and falls back to drafting from the text alone. XQA stays the decode kernel.
 
+**vLLM's start check on Linux** (2.1.1). vLLM checks at its start that `gpu_memory_utilization` times the card
+is free, even with `--kv-cache-memory-bytes`, where the value has no other use (the pool size is fixed, the memory
+profiling skipped). Under WSL nearly the whole card counts as free, so 0.92 always passed. On Linux the desktop's
+share counts: a NixOS user with 26.4 GiB free got "Free memory on device cuda:0 (25.85/31.41 GiB) on startup is
+less than desired GPU memory utilization (0.92, 28.9 GiB)" before anything was loaded. In Linux mode the launcher
+now asks for the share the preflight found free, less 1 GiB for what vLLM's own processes take first (the gap in
+that report was 0.55 GiB), at most 0.92. The same report showed the driver below `/run/opengl-driver/lib` on
+NixOS: the setup links libcuda from there, and serve.sh adds the folder to `LD_LIBRARY_PATH` and sets
+`TRITON_LIBCUDA_PATH`, as neither the loader nor Triton (which asks `ldconfig`) looks there by itself.
+
 **Main session first** (`main_first`, `SUBAGENT_CTX`, patch-vllm-main-first.py; measured 2026-11-17). With
 several slots vLLM serves first come, first served: when the pool runs out, the request that came last is pushed
 out, and a new request waits until its whole prompt fits (`scheduler_reserve_full_isl`, on by default). For a

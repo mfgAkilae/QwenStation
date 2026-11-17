@@ -149,6 +149,12 @@ export MAX_JOBS
 export CUDA_HOME="$PREFIX/cuda-sdk/nvidia/cu13"
 export PATH="$VENV/bin:$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
+# NixOS keeps the GPU driver below /run/opengl-driver/lib, where neither the loader nor Triton (which asks
+# ldconfig for libcuda) looks by itself.
+if [ -e /run/opengl-driver/lib/libcuda.so.1 ] && [ ! -e /usr/lib/wsl/lib/libcuda.so.1 ]; then
+  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/run/opengl-driver/lib"
+  export TRITON_LIBCUDA_PATH="${TRITON_LIBCUDA_PATH:-/run/opengl-driver/lib}"
+fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="${GPU_INDEX:-0}"
 export VLLM_NO_USAGE_STATS=1

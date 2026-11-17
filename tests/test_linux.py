@@ -157,6 +157,27 @@ class NativeModeTests(TempHome):
         self.assertIn("/data/qwen.station/logs/status.txt", launcher.stop_script())
         self.assertTrue(launcher.distro_check()[0])
 
+    def test_vllm_is_asked_for_no_more_of_the_card_than_is_free(self):
+        def utilization(launcher):
+            parts = [part for part in launcher.command(PRESETS["262k"]) if part.startswith("GPU_UTIL=")]
+            return parts[0].split("=", 1)[1] if parts else "0.92"
+
+        launcher = NativeLauncher(Config(mode="native", prefix="/p"))
+        self.assertEqual(utilization(launcher), "0.92")  # nothing measured: vLLM's own default
+        # Reported on NixOS: 26.4 GiB free beside a desktop, vLLM found 25.85 of 31.41 GiB and wanted 0.92 of it.
+        launcher.card = {"index": 0, "mem_free": 27034, "mem_total": 32607}
+        self.assertEqual(utilization(launcher), "0.79")
+        self.assertLess(0.79 * 31.41, 25.85)
+        launcher.card = {"index": 0, "mem_free": 31500, "mem_total": 32607}  # nothing else on the card
+        self.assertEqual(utilization(launcher), "0.92")
+        launcher.gpu_index = 1
+        launcher.card = {"index": 1, "mem_free": 27034, "mem_total": 32607}
+        command = launcher.command(PRESETS["262k"])
+        self.assertEqual(command[1:3], ["GPU_INDEX=1", "GPU_UTIL=0.79"])
+        custom = NativeLauncher(Config(mode="native", prefix="/p", gpu_memory_utilization=0.7))
+        custom.card = launcher.card
+        self.assertEqual(utilization(custom), "0.7")  # a smaller setting of the user's own stays
+
     def test_uninstall_removes_what_the_installation_created(self):
         paths = installer.linux_paths()
         for name, path in paths.items():

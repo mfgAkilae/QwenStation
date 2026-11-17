@@ -19,7 +19,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .config import AGENT_IDS, MODEL_ID, OUTPUT_LIMIT
+from .config import AGENT_IDS, KV_CACHE_TYPES, MODEL_ID, OUTPUT_LIMIT
 
 PROVIDER_ID = "vllm"  # OpenCode and Pi; T3 Code lists the model as vllm/<model>
 PROVIDER_NAME = "vLLM RTX 5090"
@@ -50,10 +50,10 @@ DSH_PLUGIN_NAME = "@deepseek-ai/dsh-llm-pi-ai"
 DSH_KEY_NAME = "QWEN_STATION_API_KEY"  # DeepSeek Harness reads keys by name, from its .env file
 
 
-def model_name(context: int, max_seqs: int, variant: str = "") -> str:
+def model_name(context: int, max_seqs: int, variant: str = "", kv_cache: str = "fp8") -> str:
     model = f"Qwen3.8 27B {variant}".strip()
     slots = f" - {max_seqs} slots" if max_seqs > 1 else ""
-    return f"{model} - FP8 KV - DFlash2 - {context // 1000}K (RTX 5090){slots}"
+    return f"{model} - {KV_CACHE_TYPES.get(kv_cache, kv_cache)} KV - DFlash2 - {context // 1000}K (RTX 5090){slots}"
 
 
 def _home() -> Path:
@@ -162,7 +162,7 @@ def key_reference(key_file: Path | None) -> str:
 # ---- OpenCode and Pi ------------------------------------------------------------------------------------------
 
 def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
-                   api_key: str = "", key_file: Path | None = None, vision: bool = False) -> dict:
+                   api_key: str = "", key_file: Path | None = None, vision: bool = False, kv_cache: str = "fp8") -> dict:
     """Same entry shape as register-qwen-opencode.py, so both starters agree."""
     updated = copy.deepcopy(config)
     provider = _child(_child(updated, "provider"), PROVIDER_ID)
@@ -175,7 +175,7 @@ def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, var
     elif options.get("apiKey") == key_reference(key_file):
         del options["apiKey"]  # the key was removed in the settings; a key the user wrote here stays
     entry = _child(_child(provider, "models"), MODEL_ID)
-    entry["name"] = model_name(context, max_seqs, variant)
+    entry["name"] = model_name(context, max_seqs, variant, kv_cache)
     entry["reasoning"] = True
     # Images: OpenCode only offers attachments for a model that says it takes them.
     if vision or "attachment" in entry:
@@ -197,7 +197,7 @@ def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, var
 
 
 def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
-             api_key: str = "", key_file: Path | None = None, vision: bool = False) -> dict:
+             api_key: str = "", key_file: Path | None = None, vision: bool = False, kv_cache: str = "fp8") -> dict:
     updated = copy.deepcopy(config)
     updated.setdefault("$schema", "https://pi.dev/schemas/models.schema.json")
     provider = _child(_child(updated, "providers"), PROVIDER_ID)
@@ -225,7 +225,7 @@ def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: 
     if entry is None:
         entry = {"id": MODEL_ID}
         models.append(entry)
-    entry["name"] = model_name(context, max_seqs, variant)
+    entry["name"] = model_name(context, max_seqs, variant, kv_cache)
     entry["reasoning"] = True
     # Pi levels -> reasoning_effort. null marks a level this checkpoint cannot do; Pi then clamps.
     entry["thinkingLevelMap"] = {"off": None, "minimal": None, "low": "low", "medium": "medium",
@@ -240,7 +240,7 @@ def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: 
 # ---- Copilot in VS Code ---------------------------------------------------------------------------------------
 
 def apply_copilot(groups: list, base_url: str, context: int, max_seqs: int, variant: str = "",
-                  api_key: str = "", key_file: Path | None = None, vision: bool = False) -> list:
+                  api_key: str = "", key_file: Path | None = None, vision: bool = False, kv_cache: str = "fp8") -> list:
     """VS Code's chatLanguageModels.json: a list of provider groups. Ours is a "Custom Endpoint" group."""
     updated = copy.deepcopy(groups)
     group = next((item for item in updated if isinstance(item, dict) and item.get("name") == OWN_PROVIDER_NAME
@@ -257,7 +257,7 @@ def apply_copilot(groups: list, base_url: str, context: int, max_seqs: int, vari
     if entry is None:
         entry = {"id": MODEL_ID}
         models.append(entry)
-    entry["name"] = model_name(context, max_seqs, variant)
+    entry["name"] = model_name(context, max_seqs, variant, kv_cache)
     entry["url"] = f"{base_url}/chat/completions"  # an explicit path: VS Code then sends exactly there
     entry["toolCalling"] = True
     entry["vision"] = vision
@@ -275,13 +275,13 @@ def apply_copilot(groups: list, base_url: str, context: int, max_seqs: int, vari
 # and replaces or adds only that block. Every other line, comments included, stays as it was.
 
 def deepseek_provider(base_url: str, context: int, max_seqs: int, variant: str = "", api_key: str = "",
-                      vision: bool = False) -> dict:
+                      vision: bool = False, kv_cache: str = "fp8") -> dict:
     # DeepSeek Harness refuses a route without a key, also when the server needs none; the .env then holds "local".
     provider: dict = {"displayName": PROVIDER_NAME, "api": "openai-completions", "baseURL": base_url,
                       "apiKeyEnv": DSH_KEY_NAME}
     provider["compat"] = {"supportsStore": False, "supportsDeveloperRole": False, "supportsReasoningEffort": True,
                           "maxTokensField": "max_tokens", "thinkingFormat": "openai"}
-    provider["models"] = [{"id": MODEL_ID, "name": model_name(context, max_seqs, variant),
+    provider["models"] = [{"id": MODEL_ID, "name": model_name(context, max_seqs, variant, kv_cache),
                            "contextWindow": context, "maxTokens": OUTPUT_LIMIT,
                            "input": ["text", "image"] if vision else ["text"],
                            "reasoningEfforts": {level: level for level in REASONING_LEVELS}}]
@@ -460,13 +460,13 @@ def _status(name: str, path: Path, model: str) -> dict:
 def _register(name: str, path: Path, apply, base_url: str, context: int, max_seqs: int,
               dry_run: bool, must_exist: bool, guard_credentials: bool, variant: str = "",
               api_key: str = "", key_file: Path | None = None, vision: bool = False, root: type = dict,
-              model: str = f"{PROVIDER_ID}/{MODEL_ID}") -> dict:
+              model: str = f"{PROVIDER_ID}/{MODEL_ID}", kv_cache: str = "fp8") -> dict:
     status = _status(name, path, model)
     try:
         if must_exist and not path.parent.is_dir():
             return {**status, "status": "missing", "detail": f"{name} is not set up here"}
         original, text = _load(path, root)
-        updated = apply(original, base_url, context, max_seqs, variant, api_key, key_file, vision)
+        updated = apply(original, base_url, context, max_seqs, variant, api_key, key_file, vision, kv_cache)
         if updated == original:
             return {**status, "status": "ok", "detail": "registered"}
         if dry_run:
@@ -482,14 +482,14 @@ def _register(name: str, path: Path, apply, base_url: str, context: int, max_seq
 
 
 def _register_deepseek(home: Path, base_url: str, context: int, max_seqs: int, dry_run: bool, variant: str,
-                       api_key: str, vision: bool) -> dict:
+                       api_key: str, vision: bool, kv_cache: str = "fp8") -> dict:
     path = deepseek_path(home)
     status = _status(AGENTS["deepseek"], path, f"{OWN_PROVIDER}/{MODEL_ID}")
     try:
         if not path.parent.is_dir():
             return {**status, "status": "missing", "detail": f"{AGENTS['deepseek']} is not set up here"}
         text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
-        updated = apply_deepseek(text, deepseek_provider(base_url, context, max_seqs, variant, api_key, vision))
+        updated = apply_deepseek(text, deepseek_provider(base_url, context, max_seqs, variant, api_key, vision, kv_cache))
         env_path = home / ".env"
         env_text = env_path.read_text(encoding="utf-8-sig") if env_path.exists() else ""
         env_updated = apply_dotenv(env_text, DSH_KEY_NAME, api_key or "local")
@@ -510,14 +510,14 @@ def _register_deepseek(home: Path, base_url: str, context: int, max_seqs: int, d
 
 
 def _register_copilot(folders: list[Path], base_url: str, context: int, max_seqs: int, dry_run: bool, variant: str,
-                      api_key: str, vision: bool) -> dict:
+                      api_key: str, vision: bool, kv_cache: str = "fp8") -> dict:
     name = AGENTS["copilot"]
     if not folders:
         return {**_status(name, Path("chatLanguageModels.json"), f"{OWN_PROVIDER_NAME}/{MODEL_ID}"),
                 "status": "missing", "detail": "VS Code is not set up here"}
     results = [_register(name, folder / "chatLanguageModels.json", apply_copilot, base_url, context, max_seqs,
                          dry_run, must_exist=True, guard_credentials=False, variant=variant, vision=vision,
-                         root=list, model=f"{OWN_PROVIDER_NAME}/{MODEL_ID}") for folder in folders]
+                         root=list, model=f"{OWN_PROVIDER_NAME}/{MODEL_ID}", kv_cache=kv_cache) for folder in folders]
     worst = next((result for state in ("error", "outdated", "missing") for result in results
                   if result["status"] == state), results[0])
     combined = {**worst, "path": "; ".join(result["path"] for result in results)}
@@ -550,10 +550,10 @@ def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = Fal
                  opencode_file: Path | None = None, pi_file: Path | None = None, variant: str = "",
                  api_key: str = "", key_file: Path | None = None, vision: bool = False,
                  agents=AGENT_IDS, deepseek_dir: Path | None = None, copilot_folders: list[Path] | None = None,
-                 t3_dir: Path | None = None) -> dict:
+                 t3_dir: Path | None = None, kv_cache: str = "fp8") -> dict:
     """Enter the model in every chosen agent. Returns one status per agent, in the order of AGENTS."""
     chosen = set(agents)
-    common = {"variant": variant, "api_key": api_key, "vision": vision}
+    common = {"variant": variant, "api_key": api_key, "vision": vision, "kv_cache": kv_cache}
     # T3 Code runs OpenCode and Pi; choosing it keeps their entries up to date.
     use_opencode = bool(chosen & {"opencode", "t3code"})
     use_pi = bool(chosen & {"pi", "t3code"})
@@ -593,12 +593,12 @@ def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = Fal
     result["pi"] = pi
     if "deepseek" in chosen:
         result["deepseek"] = _register_deepseek(deepseek_dir or deepseek_home(), base_url, context, max_seqs, dry_run,
-                                                variant, api_key, vision)
+                                                variant, api_key, vision, kv_cache)
     else:
         result["deepseek"] = _not_selected(AGENTS["deepseek"], deepseek_path(deepseek_dir))
     if "copilot" in chosen:
         folders = copilot_dirs() if copilot_folders is None else copilot_folders
-        result["copilot"] = _register_copilot(folders, base_url, context, max_seqs, dry_run, variant, api_key, vision)
+        result["copilot"] = _register_copilot(folders, base_url, context, max_seqs, dry_run, variant, api_key, vision, kv_cache)
     else:
         result["copilot"] = _not_selected(AGENTS["copilot"], "chatLanguageModels.json")
     for agent_id, entry in result.items():

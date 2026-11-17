@@ -12,7 +12,16 @@ from pathlib import Path
 
 MODEL_ID = "qwen38-gittensor-dflash"
 MODEL_TITLE = "Qwen3.8 27B"
-MODEL_SUBTITLE = "NVFP4, FP8 KV, DFlash2"
+# How the KV cache stores keys and values: NVFP4 (4 bit, the default since 2.0) or FP8.
+KV_CACHE_TYPES = {"nvfp4": "NVFP4", "fp8": "FP8"}
+DEFAULT_KV_CACHE = "nvfp4"
+
+
+def model_subtitle(kv_cache: str = DEFAULT_KV_CACHE) -> str:
+    return f"NVFP4, {KV_CACHE_TYPES.get(kv_cache, kv_cache)} KV, DFlash2"
+
+
+MODEL_SUBTITLE = model_subtitle()
 # Legacy mode only (a hand-built engine folder with its own start scripts): set "root" and "distro".
 DEFAULT_ROOT = ""
 DEFAULT_DISTRO = "Ubuntu"
@@ -103,6 +112,7 @@ class Config:
     vision: bool = False  # load the image encoder: requests may contain images, at the cost of some VRAM
     slots: int = 1  # requests the server works on at the same time; they share the context
     ram_cache_gib: int = 0  # sessions pushed out of the GPU are kept in this much RAM; 0: off
+    kv_cache: str = DEFAULT_KV_CACHE  # "nvfp4" (about 1.8 times the context per GiB) or "fp8"
     extra_args: str = ""  # appended to the `vllm serve` command line, for experiments
     vllm_prefix: str = ""  # venv to run, e.g. /opt/vllm-0.32.0; empty: the start script's default
     model_base: str = ""  # WSL folder holding target and drafter; empty: the Windows folder via /mnt
@@ -151,6 +161,8 @@ class Config:
             raise ValueError(f"ram_cache_gib must be a number from 0 to {MAX_RAM_CACHE_GIB}")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
+        if self.kv_cache not in KV_CACHE_TYPES:
+            raise ValueError(f"kv_cache must be one of: {', '.join(KV_CACHE_TYPES)}")
         if not isinstance(self.agents, list) or any(agent not in AGENT_IDS for agent in self.agents) \
                 or len(set(self.agents)) != len(self.agents):
             raise ValueError(f"agents must be a list of: {', '.join(AGENT_IDS)}")
@@ -237,6 +249,7 @@ _FILE_KEYS = {
     "vision": bool,
     "slots": int,
     "ram_cache_gib": int,
+    "kv_cache": str,
     "extra_args": str,
     "vllm_prefix": str,
     "model_base": str,

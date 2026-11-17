@@ -376,7 +376,7 @@ class VisionTests(TempData):
         self.assertEqual(supervisor_module.fit_context(free, 262144, with_vision)[0], 196608)
 
     def test_the_start_fits_the_context_for_vision_even_when_the_plain_model_would_fit(self):
-        config = Config(mode="managed", vision=True, register_clients=False)
+        config = Config(mode="managed", vision=True, register_clients=False, kv_cache="fp8")  # FP8 calibration
         supervisor = Supervisor(config, MockLauncher(config))
         row = {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": 32.0 * 1024, "mem_used": 0}
         config.mock = False  # the preflight only looks at the card for a real server
@@ -430,7 +430,8 @@ class SlotTests(TempData):
         return {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": free_gib * 1024, "mem_used": 0}
 
     def preflight(self, free_gib, **overrides):
-        config = Config(**{"mode": "managed", "register_clients": False, **overrides})
+        # The figures in these tests are those of the FP8 calibration; NvfpTests has the NVFP4 ones.
+        config = Config(**{"mode": "managed", "register_clients": False, "kv_cache": "fp8", **overrides})
         supervisor = Supervisor(config, MockLauncher(config))
         config.mock = False  # the preflight only looks at the card for a real server
         row = self.row(free_gib)
@@ -474,10 +475,10 @@ class SlotTests(TempData):
 
     def test_the_pool_follows_the_context_and_the_draft_tokens_not_the_preset(self):
         plain = Supervisor(Config(), MockLauncher(Config())).effective_preset()
-        self.assertEqual(plain["kv_bytes"], supervisor_module.kv_pool_bytes(262144))
-        more = Config(draft_tokens=11)
+        self.assertEqual(plain["kv_bytes"], supervisor_module.kv_pool_bytes(262144, kv_cache="nvfp4"))
+        more = Config(draft_tokens=11, kv_cache="fp8")
         self.assertEqual(Supervisor(more, MockLauncher(more)).effective_preset()["kv_bytes"],
-                         supervisor_module.kv_pool_bytes(262144, 11))
+                         supervisor_module.kv_pool_bytes(262144, 11, "fp8"))
 
     def test_without_the_fit_the_preset_starts_as_it_is(self):
         supervisor, vram = self.preflight(30.08, fit_context=False)
@@ -525,6 +526,70 @@ class SlotTests(TempData):
     def test_the_clients_see_the_slots_in_the_name_of_the_model(self):
         self.assertTrue(clients.model_name(229376, 1).endswith("229K (RTX 5090)"))
         self.assertTrue(clients.model_name(229376, 4).endswith("229K (RTX 5090) - 4 slots"))
+
+
+class NvfpTests(TempData):
+    """The NVFP4 KV cache, the default since 2.0, and FP8 as the setting kv_cache."""
+
+    def preflight(self, free_gib, **overrides):
+        config = Config(**{"mode": "managed", "register_clients": False, **overrides})
+        supervisor = Supervisor(config, MockLauncher(config))
+        config.mock = False
+        row = {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": free_gib * 1024, "mem_used": 0}
+        with mock.patch.object(supervisor_module.gpu, "query_once", return_value=[row]), \
+                mock.patch.object(supervisor_module.gpu, "pick", return_value=row), \
+                mock.patch.object(supervisor_module.gpu, "gpu_processes", return_value=[]):
+            supervisor.run_preflight("free")
+        return supervisor.effective_preset()
+
+    def test_nvfp4_is_the_default_and_fits_almost_twice_the_context(self):
+        self.assertEqual(Config().kv_cache, "nvfp4")
+        # 28.6 GiB free, the case of 2026-11-17: FP8 gave 131,072 tokens, NVFP4 gives the model's full context.
+        self.assertEqual(self.preflight(28.6, kv_cache="fp8")["context"], 131072)
+        self.assertEqual(self.preflight(28.6)["context"], 262144)
+        self.assertEqual(self.preflight(26.0)["context"], 131072)  # 4 GiB beside the reserve
+        # Measured: one request of 229,376 tokens needs 5.40 GiB of NVFP4 pool (vLLM: 1.07 times that fit into
+        # 5.78 GiB). The formula keeps about 5 percent more, and needs less than FP8 for half the context.
+        nvfp4 = supervisor_module.kv_pool_bytes(229376, kv_cache="nvfp4")
+        self.assertTrue(5.40 * 1.03 * 2 ** 30 < nvfp4 < 5.40 * 1.10 * 2 ** 30, nvfp4)
+        self.assertGreater(supervisor_module.kv_pool_bytes(131072, kv_cache="fp8"), nvfp4 * 0.9)
+
+    def test_the_start_script_gets_the_kv_type(self):
+        def parts(config):
+            return ManagedLauncher(config).command(PRESETS["262k"])
+
+        self.assertIn("KV_DTYPE=nvfp4", parts(Config(mode="managed")))
+        self.assertIn("KV_DTYPE=fp8", parts(Config(mode="managed", kv_cache="fp8")))
+        command = parts(Config(mode="managed", extra_env="KV_DTYPE=fp8"))
+        self.assertLess(command.index("KV_DTYPE=nvfp4"), command.index("KV_DTYPE=fp8"))  # an experiment still wins
+
+    def test_the_kv_type_is_a_model_setting_with_two_values(self):
+        config = Config()
+        self.assertEqual(settings.validate(config, settings.values(config), {"kv_cache": "int4"}, [])[2], "kv_cache")
+        with self.assertRaises(ValueError):
+            Config(kv_cache="int4").validate()
+        station = self.station()
+        station.supervisor.state = "ready"
+        self.assertEqual(station.save_settings({"kv_cache": "fp8"})["pending"], ["kv_cache"])
+        station.supervisor.before_start()
+        state = station.state_json()["model"]
+        self.assertEqual((state["kv_cache"], state["subtitle"]), ("fp8", "NVFP4, FP8 KV, DFlash2"))
+        self.assertEqual(Station(Config(), Supervisor(Config(), MockLauncher(Config()))).state_json()["model"]["subtitle"],
+                         "NVFP4, NVFP4 KV, DFlash2")
+
+    def test_several_slots_get_all_the_room_the_reserve_leaves(self):
+        one, two = self.preflight(30.3), self.preflight(30.3, slots=2)
+        self.assertEqual(one["context"], two["context"])
+        self.assertEqual(one["kv_bytes"], supervisor_module.kv_pool_bytes(262144, kv_cache="nvfp4"))
+        self.assertEqual(two["kv_bytes"], int((30.3 - supervisor_module.FIT_RESERVE_GIB) * 2 ** 30))
+        self.assertGreater(two["kv_bytes"], one["kv_bytes"])
+        # Never less than one request of the context needs, also on a card with little room left.
+        tight = self.preflight(26.0, slots=2)
+        self.assertGreaterEqual(tight["kv_bytes"], supervisor_module.kv_pool_bytes(tight["context"], kv_cache="nvfp4"))
+
+    def test_the_agents_see_the_kv_type_in_the_name_of_the_model(self):
+        self.assertEqual(clients.model_name(262144, 1, kv_cache="nvfp4"),
+                         "Qwen3.8 27B - NVFP4 KV - DFlash2 - 262K (RTX 5090)")
 
 
 class RamCacheTests(TempData):

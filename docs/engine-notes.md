@@ -132,6 +132,31 @@ arguments last and the last one wins, so the engine needs no change. Two things 
 The DFlash2 drafter is text-only; vLLM says so at the start ("Embeddings from the target model will not be
 passed to the drafter") and falls back to drafting from the text alone. XQA stays the decode kernel.
 
+**An NVFP4 KV cache by default** (`kv_cache`, `KV_DTYPE=nvfp4`; FP8 as the setting; measured 2026-11-17). vLLM 0.32
+offers `--kv-cache-dtype nvfp4` for FlashInfer: keys and values in 4 bit with an FP8 scale per 16 values, so a
+token of an attention layer takes 0.5625 of its FP8 size. FlashInfer reads it for the prefill through its FA2
+path and, on SM12x only, with the XQA decode kernel; the start log says `decode_backend=xqa,
+kv_cache_dtype=torch.uint8`. The `turboquant` and `ultraquant` types run with Triton backends only and were not
+tried: without XQA the decode is much slower here.
+
+- Size. vLLM's "KV cache size" is its concurrency times the context, so it grows with the context for the same
+  pool: a pool of 5.78 GiB showed 201,850 tokens at a context of 131,072, 234,105 at 196,608 and 245,304 at
+  229,376. Per request that is 1.55 GiB fixed (the Mamba states, unchanged) and 59,500 tokens per GiB. The same
+  reading for FP8 gives 1.50 GiB and 32,560. Qwen Station keeps 1.62 GiB and 58,000 tokens per GiB for NVFP4. A
+  prompt of 99.5 percent of 262,144 tokens then filled the pool to 95 percent and was answered.
+- Speed, against FP8 (single runs): draft rounds per second 65 and 52 with a short prompt and behind 137K
+  tokens, against 65 and 54; tokens kept per round 6.8, 5.8 and 6.1 for reasoning (short, 33K, 137K) against
+  6.9, 6.4 and 6.1; reading 137K tokens cold 34.4 against 34 seconds; a session of 250K tokens decoded at 343
+  tok/s.
+- Recall: 8 and 16 codes hidden at spread depths of a 200K-token log and 16 in a 100K one came back complete,
+  with NVFP4 as with FP8.
+- What it gives: with the 28.6 GiB a desktop leaves free, the full context of 262,144 tokens instead of 131,072.
+- Several slots get a pool of all the VRAM the reserve leaves (`fit_context(fill=True)`), not one sized for a
+  single request of the context. With 30.4 GiB free that was 8.35 GiB, which vLLM reported as 1.39 times the
+  context. Two sessions of 149K tokens then ran at once without preemption; their prefills share the GPU (both
+  read after 79 s), and the one decoding while the other still reads gets about 20 tok/s. Sessions in RAM work
+  with 2 and 4 slots: 98 and 85 percent came back from RAM, the same answers.
+
 **Sessions in RAM, with a patch to vLLM's offloading** (`ram_cache_gib`, `KV_OFFLOAD_GIB`; off by default;
 measured 2026-11-17). The KV pool holds one large session. A second one pushes the first out of the GPU, and
 every switch between two sessions of 119K tokens then reads the prompt again: 27 seconds, 0 percent from the

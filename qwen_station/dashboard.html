@@ -308,7 +308,7 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
   <header class="top">
     <div class="ident">
       <h1 id="title">Qwen3.8 27B</h1>
-      <p id="subtitle">NVFP4, FP8 KV, DFlash2 on the RTX 5090</p>
+      <p id="subtitle">NVFP4, NVFP4 KV, DFlash2 on the RTX 5090</p>
     </div>
     <div class="status" id="status" data-tone="off" role="status" aria-live="polite">
       <svg aria-hidden="true"><use id="statusIcon" href="#i-off"/></svg>
@@ -442,12 +442,17 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
       <p class="lead">How the model starts. The preset, with the context size, is in the header of the window.</p>
       <div class="rows first">
         <div class="row" data-key="draft_tokens">
-          <div><label for="draftTokens">Draft tokens per round</label><small>7 is what the drafter was trained for. More makes reasoning faster; each extra token costs about 5,400 tokens of context.</small></div>
+          <div><label for="draftTokens">Draft tokens per round</label><small>7 is what the drafter was trained for. More makes reasoning faster; each extra token costs about 10,000 tokens of context with NVFP4, 5,400 with FP8.</small></div>
           <input class="short" id="draftTokens" type="number" inputmode="numeric">
           <p class="err" hidden></p>
         </div>
+        <div class="row" data-key="kv_cache">
+          <div><label for="kvCache">KV cache</label><small>NVFP4 stores keys and values in 4 bit and holds about 1.8 times the context of FP8 in the same VRAM, at the same speed. FP8 is the format of Qwen Station 1.x.</small></div>
+          <select id="kvCache"><option value="nvfp4">NVFP4</option><option value="fp8">FP8</option></select>
+          <p class="err" hidden></p>
+        </div>
         <div class="row" data-key="slots">
-          <div><label for="slots">Requests at the same time</label><small>The slots share the context. A slot costs nothing; every request that runs takes about 52,000 tokens of the context for its own state, plus its text. A request that does not fit waits.</small></div>
+          <div><label for="slots">Requests at the same time</label><small>The slots share the KV cache. A slot costs nothing; every request that runs takes about 1.6 GiB of it for its own state (the room of 94,000 tokens with NVFP4, 52,000 with FP8), plus its text. With more than one slot the cache gets all the VRAM the model leaves. A request that does not fit waits.</small></div>
           <input class="short" id="slots" type="number" inputmode="numeric">
           <p class="err" hidden></p>
         </div>
@@ -1208,7 +1213,7 @@ function updateSettings() {
     + `<dt>Model</dt><dd><code>${esc(settingsData.model)}</code></dd>`;
   $("sumApi").textContent = (reach === "local" ? "This computer only" : reach === "all" ? "All networks" : host || "One address")
     + (key ? ", with key" : shared ? ", no key" : "");
-  $("sumModel").textContent = `${$("draftTokens").value} draft tokens` + ($("slots").value > 1 ? `, ${$("slots").value} slots` : "")
+  $("sumModel").textContent = `${$("kvCache").value === "fp8" ? "FP8" : "NVFP4"} KV, ${$("draftTokens").value} draft tokens` + ($("slots").value > 1 ? `, ${$("slots").value} slots` : "")
     + ($("vision").checked ? ", vision" : "") + ($("ramCache").value > 0 ? `, ${$("ramCache").value} GiB RAM` : "")
     + ($("autostart").checked ? ", starts with the app" : "");
   $("sumApp").textContent = radio("closeAction") === "keep" ? "Closing keeps the model" : "Closing stops the model";
@@ -1264,6 +1269,7 @@ function fillSettings(data) {
   $("draftTokens").value = v.draft_tokens;
   [$("draftTokens").min, $("draftTokens").max] = data.limits.draft_tokens;
   $("slots").value = v.slots;
+  $("kvCache").value = v.kv_cache;
   $("ramCache").value = v.ram_cache_gib;
   [$("ramCache").min, $("ramCache").max] = data.limits.ram_cache_gib;
   [$("slots").min, $("slots").max] = data.limits.slots;
@@ -1298,7 +1304,7 @@ async function saveSettings() {
   const whole = (id) => /^\d+$/.test($(id).value.trim()) ? Number($(id).value) : null;
   const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens"), slots: whole("slots"), ram_cache_gib: whole("ramCache") };
   for (const [key, value] of Object.entries(numbers)) if (value === null) { settingsError(key, "Enter a whole number."); return; }
-  const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked, vision: $("vision").checked,
+  const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked, kv_cache: $("kvCache").value, vision: $("vision").checked,
     autostart: $("autostart").checked, agents: chosenAgents(), close_action: radio("closeAction"),
     extra_args: $("extraArgs").value, extra_env: $("extraEnv").value };
   let result;

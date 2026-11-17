@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__, installer, metrics
-from .config import (AGENT_IDS, MODEL_ID, MODEL_SUBTITLE, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
+from .config import (AGENT_IDS, MODEL_ID, model_subtitle, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
                      resource_path)
 from . import clients, settings
 from .config import save_settings, settings_path
@@ -149,7 +149,8 @@ class Station:
                         "lan": self.config.lan,
                         "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "vision": self.config.vision,
-                      "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else ""),
+                      "subtitle": model_subtitle(self.config.kv_cache) + (", vision" if self.config.vision else ""),
+                      "kv_cache": self.config.kv_cache,
                       "ram_cache_gib": self.config.ram_cache_gib,
                       "context": snapshot["context"],
                       "max_seqs": self.config.slots},
@@ -627,6 +628,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Do not shrink the context automatically when VRAM is short")
     parser.add_argument("--ram-cache-gib", type=int, dest="ram_cache_gib",
                         help="Keep sessions that leave the GPU in this much RAM, in GiB (default 0: off)")
+    parser.add_argument("--kv-cache", choices=("nvfp4", "fp8"), dest="kv_cache",
+                        help="How the KV cache stores keys and values: nvfp4 (default, more context) or fp8")
     parser.add_argument("--slots", type=int, dest="slots",
                         help="Requests the server works on at the same time (default 1); they share the context")
     parser.add_argument("--vision", action="store_true", default=None,
@@ -669,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {key: getattr(args, key) for key in
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
-                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "ram_cache_gib",
+                      "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "ram_cache_gib", "kv_cache",
                       "register_clients", "agents")}
         config = load_config(args.config, overrides)
         if config.mock:

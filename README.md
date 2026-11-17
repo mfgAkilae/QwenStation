@@ -14,7 +14,7 @@ file. Steps for [Windows](#install-on-windows) and for [Linux](#install-on-linux
 |---|---|
 | **Set up with one click** | The setup installs the engine, the GPU kernels and the model without further questions, in 6 to 8 minutes on a fast connection. A newer version updates without a click. [Windows](#install-on-windows), [Linux](#install-on-linux) |
 | **Fast answers** | A drafter proposes several tokens per round and the model keeps the right ones: about 160 tok/s for prose, 330 for code and 450 for reasoning, up to 554 with more draft tokens. [Speed](#speed) |
-| **A long context that stays fast** | Up to 229,376 tokens on Windows and 262,144 on Linux. The app sizes the context to the free VRAM, so the card never pages. [Context](#free-vram-decides-the-context-size) |
+| **A long context that stays fast** | The model's full 262,144 tokens, also on Windows with a desktop on the same card: the KV cache is stored in 4 bit (NVFP4). The app sizes the context to the free VRAM, so the card never pages. [Context](#free-vram-decides-the-context-size) |
 | **OpenAI-compatible API** | `http://127.0.0.1:8000/v1`, the unmodified vLLM endpoint. For this computer only by default; the settings open it for your network and generate an API key. [Settings](#settings) |
 | **A live dashboard** | Decode speed, GPU, time to the first token, KV cache, cache hits, draft acceptance, the last requests and the server log. [What the window shows](#what-the-window-shows) |
 | **Several requests at once** | Up to 4 slots that share the context. Four requests together reach about 1,370 tok/s. [Several requests at once](#several-requests-at-once) |
@@ -26,7 +26,7 @@ file. Steps for [Windows](#install-on-windows) and for [Linux](#install-on-linux
 
 ## What is inside
 
-- **Model:** Qwen3.8 27B as NVFP4 (Gittensor build for the RTX 5090), FP8 KV cache, DFlash2 drafter for
+- **Model:** Qwen3.8 27B as NVFP4 (Gittensor build for the RTX 5090), NVFP4 KV cache (FP8 as an option), DFlash2 drafter for
   speculative decoding.
 - **Engine:** vLLM 0.32.0 with six small patches and verified kernel tuning. The reasons and measurements are
   in [docs/engine-notes.md](docs/engine-notes.md).
@@ -183,21 +183,30 @@ the app, which hands the bytes on unchanged (see [Settings](#settings)).
 
 The card has 31.8 GiB. Beside its KV cache the model takes 20.3 GiB at the start and up to 21.3 GiB after long
 sessions, and Windows starts paging GPU memory about 0.65 GiB before the card is full. So Qwen Station keeps
-22 GiB for that and gives the rest to the context:
+22 GiB for that and gives the rest to the KV cache. How much context that is depends on how the cache stores keys
+and values: NVFP4 (4 bit, the default since 2.0) holds about 1.8 times as many tokens per GiB as FP8.
 
-| Free at start | Context |
-|---|---|
-| 31.9 GiB (Windows), 31.4 GiB (Linux) | 262,144 tokens, the model's full context |
-| 30.9 GiB | 229,376 |
-| 29.9 GiB | 196,608 |
-| 28.9 GiB | 163,840 |
-| each GiB less | 32,768 tokens less. The window says so, and the coding agents get the smaller limit. |
-| too little for 65,536 tokens (25.7 GiB) | No automatic start. The window lists the programs that hold the most GPU memory. |
+| Free at start (Windows) | Context with NVFP4 (default) | Context with FP8 |
+|---|---|---|
+| 31.95 GiB | 262,144 tokens, the model's full context | 262,144 |
+| 30.9 GiB | 262,144 | 229,376 |
+| 29.9 GiB | 262,144 | 196,608 |
+| 28.9 GiB | 262,144 | 163,840 |
+| 28.3 GiB | 262,144 | 131,072 |
+| 27.7 GiB | 229,376 | 98,304 |
+| 27.2 GiB | 196,608 | 98,304 |
+| 26.6 GiB | 163,840 | 65,536 |
+| 26.0 GiB | 131,072 | 65,536 |
+| 25.4 GiB | 98,304 | too little: no automatic start |
+| 24.9 GiB | 65,536 | too little |
+| less | too little: no automatic start | too little |
 
-On Windows the card never has 31.9 GiB free, so the largest context there is 229,376 tokens, with a card that
-runs nothing else: connect the displays to another graphics card or to the mainboard. A desktop with a browser
-on the same card takes 1 to 3 GiB, and 163,840 or 196,608 tokens are the usual result. On Linux, which does not
-page GPU memory, 0.5 GiB less is kept and the full context fits a card that is free.
+Each step down is 32,768 tokens; the window says so, and the coding agents get the smaller limit. Below the
+last row the window lists the programs that hold the most GPU memory. On Linux, which does not page GPU memory,
+0.5 GiB less is kept.
+
+With NVFP4 a desktop with a browser on the same card (1 to 3 GiB) still leaves the full context. With FP8 the full
+context needs a card that runs nothing else, and 163,840 or 196,608 tokens are the usual result.
 
 The reason for the reserve: if the model does not fit, Windows pages GPU memory. That does not show at once.
 Up to version 1.5.0 the full context started whenever 29.3 GiB were free; with 30.1 GiB free the card then ran
@@ -207,8 +216,26 @@ the automatic off; the preset then starts as it is.
 
 The context is usable to its end. Up to version 1.5.0 the KV cache was 2 percent too small for that: a request
 of more than about 97 percent of the context never got an answer, because it ran out of cache blocks and
-started over, again and again. Now a prompt of 99.7 percent of the context is answered, and a longer one gets
-an error at once.
+started over, again and again. Now a prompt of 99.7 percent of the context is answered (FP8), and with NVFP4 one
+of 99.5 percent of 262,144 tokens filled the cache to 95 percent; a longer one gets an error at once.
+
+### The KV cache: NVFP4 or FP8
+
+**Settings, Model, KV cache** (`kv_cache`, `--kv-cache`). NVFP4 stores keys and values in 4 bit with one scale per
+16 values, FP8 in 8 bit. vLLM 0.32 reads an NVFP4 cache with the same fast decode kernel (XQA) on the RTX 5090.
+Measured on 2026-11-17:
+
+| | FP8 | NVFP4 |
+|---|---|---|
+| Tokens per GiB of KV cache | 32,400 | 58,000 |
+| KV cache Qwen Station gives one request of 229,376 tokens | 8.9 GiB | 5.7 GiB |
+| Draft rounds per second (short prompt, 137K) | 65, 54 | 65, 52 |
+| Tokens kept per round, reasoning (short, 33K, 137K) | 6.9, 6.4, 6.1 | 6.8, 5.8, 6.1 |
+| Reading 137K tokens cold | 34 s | 34.4 s |
+| 8 and 16 codes hidden in 200K tokens, 16 in 100K | all found | all found |
+
+The figures are single runs; decode speeds differ by up to 10 percent between runs either way. The drafter keeps
+as many tokens per round as with FP8. FP8 stays as the setting for anyone who wants the format of Qwen Station 1.x.
 
 ## Settings
 
@@ -263,6 +290,7 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   "api_host": "127.0.0.1",
   "api_key": "",
   "fit_context": true,
+  "kv_cache": "nvfp4",
   "api_port": 8000,
   "station_port": 8010,
   "agents": ["t3code", "opencode", "pi", "deepseek", "copilot"],
@@ -276,6 +304,8 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   engine folder on Linux). The earlier preset `parallel-96k` is now the setting `slots`.
 - `slots`: how many requests the server works on at the same time, 1 (default) to 4. See
   [Several requests at once](#several-requests-at-once).
+- `kv_cache`: `nvfp4` (default) or `fp8`, how the KV cache stores keys and values. See
+  [The KV cache: NVFP4 or FP8](#the-kv-cache-nvfp4-or-fp8).
 - `ram_cache_gib`: how many GiB of RAM hold sessions that left the GPU, 0 (default, off) to 128. See
   [Sessions in RAM](#sessions-in-ram).
 - `agents`: the coding agents that get the model, any of `t3code`, `opencode`, `pi`, `deepseek` and `copilot`
@@ -288,14 +318,15 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 - `fit_context`: `false` switches the automatic context reduction off.
 - `vision`: `true` loads the image encoder, so requests may contain images. See [Vision](#vision).
 - `draft_tokens`: how many tokens the drafter proposes per round, 7 by default, up to 15. More makes reasoning
-  17 to 30 percent faster and costs about 5,400 tokens of context each, see [Speed](#speed).
+  17 to 30 percent faster and costs 0.17 GiB of KV cache each (about 10,000 tokens of context with NVFP4,
+  5,400 with FP8), see [Speed](#speed).
 - `extra_args`: appended to `vllm serve`. `extra_env`: `KEY=VALUE` pairs for the start script, for example
   `XQA_DECODE=0`.
 
 The same values work as command line options: `Qwen-Station.exe --preset 237k --keep --no-autostart`, on Linux
 `qwen-station --preset 237k --no-autostart`. `--check` prints the state of the installation as JSON and exits.
 `--setup` starts a needed setup without the click, `--location` names its folder. `--api-host 0.0.0.0` sets
-the address of the API for one run, `--agents opencode,pi` the coding agents, and `--no-register-clients` leaves
+the address of the API for one run, `--kv-cache fp8` the KV cache, `--agents opencode,pi` the coding agents, and `--no-register-clients` leaves
 every agent alone.
 
 ## Speed
@@ -322,12 +353,12 @@ The drafter was trained for blocks of 8 (7 draft tokens), but it keeps proposing
 `draft_tokens` raises the number. Each round then takes a little longer, and the KV cache needs a state per
 extra token, which costs context:
 
-| `draft_tokens` | Prose | Code | Reasoning | Rounds per second (short, 137K) | Context with 31.5 GiB free (Windows) |
+| `draft_tokens` | Prose | Code | Reasoning | Rounds per second (short, 137K) | Context with 28.6 GiB free (Windows), NVFP4 / FP8 |
 |---|---|---|---|---|---|
-| 7 (default) | 160, 217, 192 | 331, 349, 238 | 451, 391, 323 | 65, 54 | 229,376 |
-| 9 | 147, 206, 190 | 318, 298, 295 | 509, 461, 332 | 62, 53 | 229,376 |
-| 11 | 155, 188, 176 | 381, 280, 254 | 527, 443, 403 | 61, 47 | 196,608 |
-| 15 | 153, 216, 165 | 374, 300, 278 | 554, 461, 419 | 60, 46 | 196,608 |
+| 7 (default) | 160, 217, 192 | 331, 349, 238 | 451, 391, 323 | 65, 54 | 262,144 / 131,072 |
+| 9 | 147, 206, 190 | 318, 298, 295 | 509, 461, 332 | 62, 53 | 229,376 / 131,072 |
+| 11 | 155, 188, 176 | 381, 280, 254 | 527, 443, 403 | 61, 47 | 229,376 / 131,072 |
+| 15 | 153, 216, 165 | 374, 300, 278 | 554, 461, 419 | 60, 46 | 196,608 / 98,304 |
 
 The three numbers per cell are tok/s for a short prompt, behind 33K and behind 137K tokens. Reasoning gains 17 to
 30 percent with 11 or 15 draft tokens at every context size. Code gains with short prompts and varies behind long
@@ -370,16 +401,24 @@ entries of the coding agents say that the model takes images.
 By default the server works on one request at a time; a second one waits. The setting **Requests at the same
 time** (`slots`, `--slots`) raises that to up to 4.
 
-The slots share the context. A slot by itself costs nothing: the KV cache is one pool, and vLLM takes from it
-for every request that runs. Each running request needs about 1.6 GiB for its own state, which is the room of
-52,000 tokens, plus its text. With a pool for 229,376 tokens that means:
+The slots share the KV cache. A slot by itself costs nothing: the cache is one pool, and vLLM takes from it for
+every request that runs. Each running request needs about 1.6 GiB for its own state (the room of 94,000 tokens
+with NVFP4, 52,000 with FP8), plus its text. With more than one slot the pool gets all the VRAM the 22 GiB
+reserve leaves, not only what one request of the full context needs. With NVFP4 that means:
 
-| Running at the same time | Tokens they can hold together |
-|---|---|
-| 1 request | 229,376 (its limit) |
-| 2 requests | about 183,000 |
-| 3 requests | about 131,000 |
-| 4 requests | about 78,000 |
+| Running at the same time | Tokens they hold together, 28.6 GiB free | 30.4 GiB free (nothing else on the card) |
+|---|---|---|
+| 1 request | 262,144 (its limit) | 262,144 |
+| 2 requests | about 208,000 | about 262,000 or more |
+| 3 requests | about 116,000 | about 223,000 |
+| 4 requests | about 24,000 | about 131,000 |
+
+**Two context windows at the same time.** With 2 slots and 30.4 GiB free, two sessions of 149K tokens ran side
+by side (measured 2026-11-17): both found the code word in their own document, nothing was pushed out. Reading
+the prompts shares the GPU: both were read after 79 seconds, as fast as one after the other. The session that
+finished reading first decoded at about 20 tok/s while the other one still read, then both at full speed.
+So two agents can each keep a long session open and work at the same time; when both send a new long prompt
+at the same moment, neither gets it faster.
 
 A single request may still use the whole context. If requests do not fit together, nothing fails: the later
 one waits until there is room, and reads its context again if that was pushed out of the cache
@@ -401,9 +440,8 @@ on `reasoning-v1` (1,235 to 1,355) and 976.7 on `code-v1` (897 to 1,079), agains
 Its decode matrix, which writes plain prose, gave 201, 395 and 679 tok/s for 1, 2 and 4 streams
 ([run](https://www.localmaxxing.com/en/inference-benchmarks/cmwkp22m807z3mi015s8glsuu)).
 
-How many requests really run at once depends on the pool. With a context of 163,840 tokens the pool holds
-four requests' own state and about 10,000 tokens beside it: enough for four short requests, not for four long
-ones. With a larger context, or fewer requests, there is more room.
+How many requests really run at once depends on the pool: four requests need about 6.2 GiB for their own state
+before their first token, so four long sessions at once need a card that runs nothing else, or fewer slots.
 
 Requests that run together move at the pace of the longest context among them, so a short request beside a
 long session gets about half its usual speed. Answers can differ in single words from the ones the same request
@@ -444,9 +482,14 @@ What it costs:
   without the cache and the log says so.
 - **Nothing on the GPU.** The context and the speed of a single session stay as they are.
 
-This is not a second context: one request still has the limit of the context, and two large sessions still do
-not run at the same moment (see above). It removes the wait when they take turns. It needs a patch to vLLM,
-which Qwen Station applies; [engine-notes.md](docs/engine-notes.md) has the details.
+It works with several slots as well (measured 2026-11-17 with NVFP4 and 24 GiB): with 2 slots, two sessions of
+149K tokens at once, then two others, then the first two again: they came back with 98 percent from RAM and
+their first tokens after 2.0 and 3.6 seconds instead of 46 and 78. With 4 slots, four sessions of 24K tokens
+came back with 85 percent from RAM after 0.9 to 1.9 seconds. The answers were the same as on the first visit.
+
+It does not make the context larger: one request still has the limit of the context. It removes the wait
+when sessions take turns. It needs a patch to vLLM, which Qwen Station applies;
+[engine-notes.md](docs/engine-notes.md) has the details.
 
 ### Measure it yourself
 
@@ -547,6 +590,11 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   context chosen at 29.1 GiB free (163,840), a session of 152K tokens (405 tok/s), 4 slots through the
   settings with four requests at once (1,385 to 1,405 tok/s together), and requests sent at the moment the
   app reports "Ready".
+- **NVFP4 KV cache (2.0.0)**, on Windows with the real model in a development distribution: start and pool size
+  at contexts of 131,072 to 262,144 tokens, the benchmark against FP8, recall of 8 and 16 codes in 100K and 200K
+  tokens against FP8, a session of 250K tokens and a prompt of 99.5 percent of 262,144 tokens with the pool the
+  app computes; 2 slots with the pool that takes all free VRAM, two sessions of 149K tokens at once, and sessions
+  in RAM with 2 and 4 slots.
 - **Coding agents (1.8.0)**, on Windows: the entries of all five agents into temporary copies of real configs
   (unit tests with the formats as the agents write them, including DeepSeek Harness's YAML with comments and
   other providers); DeepSeek Harness composing a copy of a real desktop profile with the new provider
@@ -587,6 +635,6 @@ Not tested on a real machine: Linux on bare metal with the native NVIDIA driver;
 manager and the window on a Linux desktop (only the terminal mode ran); distributions other than Ubuntu (the
 bundled Python is built for glibc 2.17 and newer, the package manager commands for Fedora, Arch and openSUSE are
 untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a faked WSL only);
-Windows 10; more than 4 slots; slots in Linux mode with the real model; sessions in RAM in Linux mode, together
+Windows 10; the release exe of 2.0.0 loading the model (it was installed and started without the model); NVFP4 together with vision, and over long working sessions; more than 4 slots; slots in Linux mode with the real model; sessions in RAM in Linux mode, together
 with vision, over many hours, and with WSL's default memory limit (the test machine gives WSL more); the full context of 262,144 tokens on
 a card with nothing else on it (the test machine's desktop runs on the same card).

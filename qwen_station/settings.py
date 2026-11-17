@@ -13,14 +13,14 @@ import subprocess
 import threading
 import time
 
-from .config import (AGENT_IDS, ANY_HOST, API_KEY_PATTERN, DEFAULT_DRAFT_TOKENS, LOCAL_HOST, MAX_DRAFT_TOKENS,
+from .config import (AGENT_IDS, KV_CACHE_TYPES, ANY_HOST, API_KEY_PATTERN, DEFAULT_DRAFT_TOKENS, LOCAL_HOST, MAX_DRAFT_TOKENS,
                      MAX_RAM_CACHE_GIB, MAX_SLOTS, Config)
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Read when the model starts: a change waits for the next start while the model runs.
-MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "vision", "slots", "ram_cache_gib", "fit_context",
-              "extra_args", "extra_env")
+MODEL_KEYS = ("api_host", "api_port", "api_key", "draft_tokens", "vision", "slots", "ram_cache_gib", "kv_cache",
+              "fit_context", "extra_args", "extra_env")
 # Read all the time: a change applies at once.
 APP_KEYS = ("autostart", "close_action", "agents")
 # The dashboard's own port: the running app keeps it until it is started again.
@@ -28,7 +28,7 @@ RESTART_KEYS = ("station_port",)
 EDITABLE = MODEL_KEYS + APP_KEYS + RESTART_KEYS
 
 KINDS = {"api_host": str, "api_port": int, "api_key": str, "station_port": int, "draft_tokens": int,
-         "fit_context": bool, "vision": bool, "slots": int, "ram_cache_gib": int,
+         "fit_context": bool, "vision": bool, "slots": int, "ram_cache_gib": int, "kv_cache": str,
          "extra_args": str, "extra_env": str, "autostart": bool, "close_action": str, "agents": list}
 MIN_PORT = 1024
 MAX_TEXT = 2000
@@ -188,6 +188,8 @@ def validate(config: Config, current: dict, changes: dict, addresses: list[dict]
         return {}, f"Between 0 (off) and {MAX_RAM_CACHE_GIB} GiB.", "ram_cache_gib"
     if merged["close_action"] not in ("stop", "keep"):
         return {}, "Choose what happens when the window closes.", "close_action"
+    if merged["kv_cache"] not in KV_CACHE_TYPES:
+        return {}, "Choose NVFP4 or FP8.", "kv_cache"
     agents = merged["agents"]
     if any(agent not in AGENT_IDS for agent in agents) or len(set(agents)) != len(agents):
         return {}, "Choose agents from the list.", "agents"

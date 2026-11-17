@@ -39,6 +39,12 @@ VRAM_TOLERANCE_MIB = 3072  # only used when fit_context is off
 # of the context the request ran out of blocks, lost the ones it had, and started over, without end.
 KV_FIXED_GIB = 1.62
 KV_TOKENS_PER_GIB = 32400
+# NVFP4 KV (the default since 2.0): keys and values in 4 bit with a scale per 16 values, 0.5625 of the FP8 size
+# for the attention layers; the Mamba states stay as they are. Measured 2026-11-17 from vLLM's own capacity at
+# three contexts in a pool of 5.78 GiB (201,850 tokens at 131,072, 234,105 at 196,608, 245,304 at 229,376):
+# 1.55 GiB fixed and 59,500 tokens per GiB. vLLM's figures were 0.7 percent too optimistic for FP8 (see
+# above); 58,000 keeps more than that in hand. Checked with a prompt of 99.5 percent of 262,144 tokens.
+KV_CALIBRATION = {"fp8": (KV_FIXED_GIB, KV_TOKENS_PER_GIB), "nvfp4": (1.62, 58000)}
 # On top of that: the cache is handed out in blocks of 1,648 tokens, and a request that needs one more block
 # than there is does not fail, it starts over. With 1 percent a prompt of 99.7 percent of the context filled
 # the pool to 99 percent; 2 percent leave room for a few blocks more.
@@ -66,23 +72,30 @@ MIN_FIT_CONTEXT = 65536
 FIT_STEP = 32768
 
 
-def kv_fixed_gib(draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> float:
-    """The part of the KV pool that does not depend on the context."""
-    return KV_FIXED_GIB + KV_PER_DRAFT_TOKEN_GIB * max(0, draft_tokens - DEFAULT_DRAFT_TOKENS)
+def kv_fixed_gib(draft_tokens: int = DEFAULT_DRAFT_TOKENS, kv_cache: str = "fp8") -> float:
+    """The part of the KV pool that does not depend on the context (Mamba states, draft snapshots)."""
+    return KV_CALIBRATION[kv_cache][0] + KV_PER_DRAFT_TOKEN_GIB * max(0, draft_tokens - DEFAULT_DRAFT_TOKENS)
 
 
-def kv_pool_bytes(context: int, draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> int:
-    return int((kv_fixed_gib(draft_tokens) + context / KV_TOKENS_PER_GIB) * KV_MARGIN * 2 ** 30)
+def kv_pool_bytes(context: int, draft_tokens: int = DEFAULT_DRAFT_TOKENS, kv_cache: str = "fp8") -> int:
+    per_gib = KV_CALIBRATION[kv_cache][1]
+    return int((kv_fixed_gib(draft_tokens, kv_cache) + context / per_gib) * KV_MARGIN * 2 ** 30)
 
 
 def fit_context(free_mib: float, max_context: int, reserve_gib: float = FIT_RESERVE_GIB,
-                draft_tokens: int = DEFAULT_DRAFT_TOKENS) -> tuple[int, int] | None:
-    """Largest context (and its KV pool in bytes) that fits into the free VRAM, or None if too little is free."""
-    tokens = ((free_mib / 1024 - reserve_gib) / KV_MARGIN - kv_fixed_gib(draft_tokens)) * KV_TOKENS_PER_GIB
+                draft_tokens: int = DEFAULT_DRAFT_TOKENS, kv_cache: str = "fp8",
+                fill: bool = False) -> tuple[int, int] | None:
+    """Largest context (and its KV pool in bytes) that fits into the free VRAM, or None if too little is free.
+
+    With fill, the pool takes all the VRAM the reserve leaves, not just what one request of the context needs:
+    with several slots the requests share the pool, and two large sessions can then run at the same time."""
+    room = free_mib / 1024 - reserve_gib
+    tokens = (room / KV_MARGIN - kv_fixed_gib(draft_tokens, kv_cache)) * KV_CALIBRATION[kv_cache][1]
     context = min(max_context, int(tokens) // FIT_STEP * FIT_STEP)
     if context < MIN_FIT_CONTEXT:
         return None
-    return context, kv_pool_bytes(context, draft_tokens)
+    pool = kv_pool_bytes(context, draft_tokens, kv_cache)
+    return context, max(pool, int(room * 2 ** 30)) if fill else pool
 # Measured 2026-11-16 on vLLM 0.29.0: 128 against 254 tok/s at 33K context, 51 against 178 tok/s at 129K.
 XQA_WARNING = ("The server uses the XQA decode kernel. With spec decode, the speed drops sharply at long context "
                "(measured up to 3.5 times slower). The current start script forces the native kernel.")
@@ -220,6 +233,7 @@ class WslLauncher:
             env.append(f"SPEC_TOKENS={config.draft_tokens}")
         if config.ram_cache_gib:
             env.append(f"KV_OFFLOAD_GIB={config.ram_cache_gib}")
+        env.append(f"KV_DTYPE={config.kv_cache}")  # before extra_env, which may still override it
         if config.vision:
             # vLLM keys its cache of compiled graphs without the multimodal settings, but with images on the
             # model is called with embeddings instead of token ids. A graph compiled in text-only mode then
@@ -554,10 +568,12 @@ class Supervisor:
                 # What must be free for the preset's whole context: the reserve and the KV pool for it. Up to
                 # 1.5.0 this was 0.92 of the card (29.3 GiB), which let the full context start on a card that
                 # then ran full: fast with short prompts, paging with long ones.
-                need = math.ceil((reserve + kv_pool_bytes(preset["context"], drafts) / 2 ** 30) * 1024)
+                kv_cache = self.config.kv_cache
+                need = math.ceil((reserve + kv_pool_bytes(preset["context"], drafts, kv_cache) / 2 ** 30) * 1024)
                 enough = row["mem_free"] >= need
                 if self.config.fit_context:
-                    fitted = fit_context(row["mem_free"], preset["context"], reserve, drafts)
+                    fitted = fit_context(row["mem_free"], preset["context"], reserve, drafts, kv_cache,
+                                         fill=self.config.slots > 1)
                 reduced = fitted is not None and fitted[0] < preset["context"]
                 tight = not enough and not self.config.fit_context and row["mem_free"] >= need - VRAM_TOLERANCE_MIB
                 detail = (f"{_gib(row['mem_free'])} GiB free, {_dots(preset['context'])} tokens need about "
@@ -630,7 +646,7 @@ class Supervisor:
         """The preset, with context and KV pool replaced when they were fitted to the free VRAM."""
         preset = dict(PRESETS[self.preset])
         # The pool always follows the context and the draft tokens; the number in the preset is not used.
-        preset["kv_bytes"] = kv_pool_bytes(preset["context"], self.config.draft_tokens)
+        preset["kv_bytes"] = kv_pool_bytes(preset["context"], self.config.draft_tokens, self.config.kv_cache)
         if self.fitted:
             preset["context"] = self.fitted[0]
             if self.fitted[1]:
@@ -728,7 +744,8 @@ class Supervisor:
         result = clients.register_all(self.config.api_base_url, preset["context"], self.config.slots,
                                       dry_run=not write, variant=preset.get("variant", ""),
                                       api_key=self.config.api_key, key_file=data_dir() / KEY_FILE,
-                                      vision=self.config.vision, agents=self.config.agents)
+                                      vision=self.config.vision, agents=self.config.agents,
+                                      kv_cache=self.config.kv_cache)
         for entry in result.values():
             if entry.get("changed"):
                 self.log.add(f"--- {entry['client']}: model {entry['model']} {entry['detail']} ({entry['path']})", "step")

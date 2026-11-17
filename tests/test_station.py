@@ -182,7 +182,8 @@ class LauncherTests(unittest.TestCase):
         command = launcher.command({"context": 262144, "kv_bytes": 10350000000})
         self.assertEqual(command, ["wsl.exe", "-d", "Ubuntu", "--exec", "env", "VLLM_HOST=127.0.0.1",
                                    "VLLM_PORT=8000", "CTX=262144", "KV_BYTES=10350000000", "MAX_SEQS=1",
-                                   "EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health", "bash",
+                                   "EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health",
+                                   "KV_DTYPE=nvfp4", "bash",
                                    "/mnt/d/qwen-engine/run-variant-logged.sh", "dflash"])
         lan = WslLauncher(Config(root=r"D:\qwen-engine", lan=True, gpu_memory_utilization=0.9,
                                  extra_args="--max-model-len 188416", vllm_prefix="/opt/vllm-0.32.0"))

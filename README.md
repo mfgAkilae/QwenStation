@@ -3,27 +3,39 @@
 One file that installs and runs Qwen3.8 27B on a single RTX 5090, serves an OpenAI-compatible API and shows
 what the model is doing. For Windows and for Linux.
 
+**[Download the latest release](https://github.com/mfgAkilae/QwenStation/releases/latest)** and start the
+file. Steps for [Windows](#install-on-windows) and for [Linux](#install-on-linux).
+
+![The dashboard while the model answers a request](docs/dashboard.png)
+
+## Features
+
+| Feature | What you get |
+|---|---|
+| **Set up with one click** | The setup installs the engine, the GPU kernels and the model without further questions, in 6 to 8 minutes on a fast connection. A newer version updates without a click. [Windows](#install-on-windows), [Linux](#install-on-linux) |
+| **Fast answers** | A drafter proposes several tokens per round and the model keeps the right ones: about 160 tok/s for prose, 330 for code and 450 for reasoning, up to 554 with more draft tokens. [Speed](#speed) |
+| **A long context that stays fast** | Up to 229,376 tokens on Windows and 262,144 on Linux. The app sizes the context to the free VRAM, so the card never pages. [Context](#free-vram-decides-the-context-size) |
+| **OpenAI-compatible API** | `http://127.0.0.1:8000/v1`, the unmodified vLLM endpoint. For this computer only by default; the settings open it for your network and generate an API key. [Settings](#settings) |
+| **A live dashboard** | Decode speed, GPU, time to the first token, KV cache, cache hits, draft acceptance, the last requests and the server log. [What the window shows](#what-the-window-shows) |
+| **Several requests at once** | Up to 4 slots that share the context. Four requests together reach about 1,370 tok/s. [Several requests at once](#several-requests-at-once) |
+| **Large sessions that take turns** | Kept in RAM, a session that another one pushed out of the GPU comes back in 1 second instead of 27. Made for two agents with 120,000 tokens each. [Sessions in RAM](#sessions-in-ram) |
+| **Vision** | Optional: up to 4 images per request. [Vision](#vision) |
+| **Coding agents, ready to use** | OpenCode and Pi get the model at every start, with the right context size. T3 Code uses it through them. [Use](#use) |
+| **One settings window** | Network, API key, slots, RAM, vision and draft tokens in one place. There is a settings file and there are command line options too. [Settings](#settings) |
+| **Stays out of your system** | On Windows it runs in a WSL distribution of its own, on Linux in one folder of your user. Both can be removed completely. [Remove](#remove) |
+
+## What is inside
+
 - **Model:** Qwen3.8 27B as NVFP4 (Gittensor build for the RTX 5090), FP8 KV cache, DFlash2 drafter for
-  speculative decoding. It can read images too; that is an option, because it costs context.
-- **Engine:** vLLM 0.32.0 with six small patches and verified kernel tuning. On Windows it runs in its own
-  WSL distribution, on Linux in one folder of your user.
-- **API:** `http://127.0.0.1:8000/v1`, model `qwen38-gittensor-dflash`. For this computer only and without a
-  key by default; the settings open it for other devices, on all network interfaces or on one address, and
-  generate an API key.
-- **Speed on the test machine:** it depends on what the model writes. Short prompts: about 160 tok/s for
-  prose, 330 for code, 450 for step-by-step reasoning. Behind 137K tokens of context: 190, 240 and 320.
-  [Details and how to measure it yourself](#speed).
-- **Context:** as much as the free VRAM holds without paging, up to 229,376 tokens on Windows and the model's
-  262,144 on Linux; 163,840 to 196,608 when a desktop runs on the same card. See
-  [Free VRAM decides the context size](#free-vram-decides-the-context-size).
+  speculative decoding.
+- **Engine:** vLLM 0.32.0 with six small patches and verified kernel tuning. The reasons and measurements are
+  in [docs/engine-notes.md](docs/engine-notes.md).
 - **Runs on LocalMaxxing**
   ([listed here](https://www.localmaxxing.com/en/models/gittensor-model-hub/Qwen3.8-27B-NVFP4-RTX5090)).
   Verified, one stream: 381.5 tok/s on `reasoning-v1` and 293 tok/s on `code-v1` with the default setting;
   439.9 and 290.5 tok/s with `draft_tokens` 15. With 4 slots and four streams at once: 1,324.6 tok/s on
   `reasoning-v1` and 976.7 on `code-v1`, all streams together. The site gives its Verified badge to single
   streams only, so these two are listed without it.
-
-![The dashboard while the model answers a request](docs/dashboard.png)
 
 ## Requirements
 

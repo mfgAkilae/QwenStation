@@ -149,8 +149,8 @@ class Station:
                         "lan": self.config.lan,
                         "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "vision": self.config.vision,
-                      "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else "")
-                      + (f", {self.config.ram_cache_gib} GiB of RAM for sessions" if self.config.ram_cache_gib else ""),
+                      "subtitle": MODEL_SUBTITLE + (", vision" if self.config.vision else ""),
+                      "ram_cache_gib": self.config.ram_cache_gib,
                       "context": snapshot["context"],
                       "max_seqs": self.config.slots},
             # The key itself never leaves the app again once it is saved; a hint tells that one is set.

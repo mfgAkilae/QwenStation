@@ -34,7 +34,8 @@ button, select { font: inherit; color: inherit; }
 .wrap { max-width: 1480px; margin: 0 auto; padding: 18px 22px 28px; }
 
 /* ---- header ---- */
-.top { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.top { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px 22px; }
+.top .status { white-space: nowrap; }
 .ident h1 { font: 600 27px/1.05 var(--display); letter-spacing: .01em; font-stretch: 88%; }
 .ident p { color: var(--ink-2); font-size: 13px; margin-top: 3px; }
 .status { display: flex; align-items: center; gap: 9px; padding: 7px 14px 7px 11px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); }
@@ -48,7 +49,7 @@ button, select { font: inherit; color: inherit; }
 .status[data-tone="off"] svg { color: var(--ink-3); }
 .status[data-tone="busy"] svg { animation: spin 1.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.controls { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.controls { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
 select, .btn { height: 34px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); padding: 0 12px; cursor: pointer; }
 select:disabled { opacity: .55; cursor: not-allowed; }
 .btn.primary { background: var(--data); border-color: var(--data); color: #06222a; font-weight: 600; }
@@ -152,6 +153,14 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 .tile .meter { height: 5px; margin: 7px 0 0; }
 .tile[data-tone="warn"] { border-color: var(--warn); }
 .tile[data-tone="warn"] p { color: var(--warn); }
+
+/* ---- statistics ---- */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 16px 24px; margin-top: 14px; }
+.stat { min-width: 0; }
+.stat h3 { font: 400 13px var(--body); color: var(--ink-2); }
+.stat .num { font-size: 24px; font-weight: 600; line-height: 1.2; display: block; margin-top: 2px; }
+.stat .num small { font-size: 13.5px; font-weight: 500; color: var(--ink-2); margin-left: 3px; }
+.stat p { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; }
 
 /* ---- table ---- */
 .tablewrap { overflow-x: auto; margin-top: 10px; }
@@ -276,9 +285,10 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
 }
 [hidden] { display: none !important; }
 
+@media (max-width: 1180px) { .top { grid-template-columns: minmax(0, 1fr) auto; } .top .controls { grid-column: 1 / -1; justify-content: flex-start; flex-wrap: wrap; } }
 @media (max-width: 1080px) { .grid { grid-template-columns: 1fr; } .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .readout .activity { max-width: none; margin-left: 0; text-align: left; } }
 @media (max-width: 760px) { .steps.two { grid-template-columns: 1fr; } }
-@media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } .readout .big { font-size: 50px; } .controls { margin-left: 0; flex-wrap: wrap; } }
+@media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } .readout .big { font-size: 50px; } .top { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -344,6 +354,11 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
       <div class="tile" id="tileDraft"><h2>Tokens per draft round</h2><span class="num">–</span><p></p></div>
       <div class="tile" id="tilePre"><h2>Preemptions</h2><span class="num">–</span><p></p></div>
     </div>
+
+    <section class="panel span2" aria-label="Statistics">
+      <div class="row-between"><h2>Since the model started</h2><span class="hint" id="statsNote"></span></div>
+      <div class="stats" id="stats"></div>
+    </section>
 
     <section class="panel" aria-label="Recent requests">
       <h2>Recent requests</h2>
@@ -605,7 +620,8 @@ function render() {
   $("title").textContent = s.model.title;
   const preset = s.presets[s.preset];
   const build = s.facts.vllm_version ? `, vLLM ${s.facts.vllm_version}` : "";
-  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${s.model.max_seqs === 1 ? "1 slot" : s.model.max_seqs + " slots"}${build}`;
+  const ram = s.model.ram_cache_gib ? `, ${nf0.format(s.model.ram_cache_gib)} GiB of RAM for sessions` : "";
+  $("subtitle").textContent = `${s.model.subtitle} on the RTX 5090, ${nf0.format(s.model.context)} tokens of context, ${s.model.max_seqs === 1 ? "1 slot" : s.model.max_seqs + " slots"}${ram}${build}`;
   $("baseUrl").textContent = s.api.base_url;
   $("modelId").textContent = s.api.model;
   $("mockTag").hidden = !s.station.mock;
@@ -634,6 +650,7 @@ function render() {
   renderHero(s);
   renderGpu(s);
   renderTiles(s);
+  renderStats(s);
   renderRequests(s);
   renderPositions(s);
   renderClients(s);
@@ -847,6 +864,47 @@ function renderTiles(s) {
   tile("tileDraft", t.accept_length == null ? null : nf1.format(t.accept_length), "",
     t.accept_rate == null ? "" : `${nf0.format(t.accept_rate * 100)}% of draft tokens accepted`);
   tile("tilePre", nf0.format(t.preemptions), "", t.preemptions ? "Slows decoding down silently. Check the prefill threshold of 2048." : "none, as it should be", t.preemptions ? "warn" : "");
+}
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b), middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+function longSeconds(value) {
+  if (value == null) return "–";
+  return value < 90 ? secondsText(value) : value < 5400 ? `${nf0.format(value / 60)} min` : `${nf1.format(value / 3600)} h`;
+}
+function renderStats(s) {
+  const a = s.totals && s.totals.averages, box = $("stats");
+  const speeds = store.requests.map((r) => r.decode_tps).filter((v) => v != null);
+  const sig = JSON.stringify([a, speeds.length, speeds[0], s.state]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  if (!a) {
+    $("statsNote").textContent = "";
+    box.innerHTML = `<p class="empty">${s.state === "ready" ? "Averages appear after the first finished request." : "Statistics appear once the model is running."}</p>`;
+    return;
+  }
+  $("statsNote").textContent = "Means over the finished requests.";
+  const finish = s.totals.finish || {};
+  const ended = [["stop", "done"], ["length", "at the length limit"], ["abort", "aborted"]]
+    .filter(([key]) => finish[key]).map(([key, label]) => `${nf0.format(finish[key])} ${label}`).join(", ");
+  const recent = speeds.length > 1
+    ? `per request. Last ${speeds.length}: median ${nf0.format(median(speeds))}, best ${nf0.format(Math.max(...speeds))}` : "per request";
+  const cells = [
+    ["Requests", nf0.format(a.requests), "", ended],
+    ["Average answer", nf0.format(a.output_tokens), "tokens", `prompt: ${nf0.format(a.prompt_tokens)} tokens on average`],
+    ["Average decode speed", a.decode_tps == null ? null : nf0.format(a.decode_tps), "tok/s", recent],
+    ["Reading prompts", a.prefill_tps == null ? null : nf0.format(a.prefill_tps), "tok/s", "new prompt tokens per second"],
+    ["From the cache", a.cached_total == null ? null : nf0.format(a.cached_total), "tokens",
+      a.cache_saved_s ? `saved about ${longSeconds(a.cache_saved_s)} of reading` : "prompt tokens not read again"],
+    ["Average request", a.request_s == null ? null : (a.request_s < 10 ? nf1.format(a.request_s) : nf0.format(a.request_s)), "s",
+      a.queue_s == null ? "" : a.queue_s < 0.05 ? "no wait for a slot" : `of which ${secondsText(a.queue_s)} waiting for a slot`],
+    ["Tokens in total", nf0.format(a.prompt_total + a.output_total), "",
+      `${nf0.format(a.prompt_total)} prompt, ${nf0.format(a.output_total)} output`],
+  ];
+  box.innerHTML = cells.map(([title, value, unit, note]) => `<div class="stat"><h3>${esc(title)}</h3>
+    <span class="num">${value == null ? "–" : esc(value) + (unit ? `<small>${esc(unit)}</small>` : "")}</span><p>${esc(note || "")}</p></div>`).join("");
 }
 
 function renderRequests(s) {

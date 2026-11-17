@@ -11,7 +11,7 @@ def render(**values):
     base = {
         "running": 0, "waiting": 0, "kv": 0.0, "prompt": 0, "gen": 0, "queries": 0, "hits": 0, "preempt": 0,
         "stop": 0, "length": 0, "ttft_sum": 0.0, "count": 0, "e2e_sum": 0.0, "prefill_sum": 0.0,
-        "decode_sum": 0.0, "drafts": 0, "draft_tokens": 0, "accepted": 0, "pos": (),
+        "decode_sum": 0.0, "queue_sum": 0.0, "cached": None, "drafts": 0, "draft_tokens": 0, "accepted": 0, "pos": (),
     }
     base.update(values)
     lines = [
@@ -35,12 +35,15 @@ def render(**values):
         f"vllm:e2e_request_latency_seconds_count{LABEL} {base['count']}.0",
         f"vllm:request_prefill_time_seconds_sum{LABEL} {base['prefill_sum']}",
         f"vllm:request_decode_time_seconds_sum{LABEL} {base['decode_sum']}",
+        f"vllm:request_queue_time_seconds_sum{LABEL} {base['queue_sum']}",
         f"vllm:spec_decode_num_drafts_total{LABEL} {base['drafts']}.0",
         f"vllm:spec_decode_num_draft_tokens_total{LABEL} {base['draft_tokens']}.0",
         f"vllm:spec_decode_num_accepted_tokens_total{LABEL} {base['accepted']}.0",
         "process_cpu_seconds_total 12.5",
         "garbage line without value",
     ]
+    if base["cached"] is not None:
+        lines.append(f"vllm:prompt_tokens_cached_total{LABEL} {base['cached']}.0")
     for index, value in enumerate(base["pos"]):
         lines.append(f'vllm:spec_decode_num_accepted_tokens_per_pos_total{{engine="0",position="{index}"}} {value}.0')
     return "\n".join(lines) + "\n"
@@ -85,6 +88,24 @@ class ParserTests(unittest.TestCase):
 
 
 class TrackerTests(unittest.TestCase):
+    def test_averages_count_finished_requests_only(self):
+        tracker = metrics.Tracker()
+        tracker.update(snapshot(), now=100.0)
+        self.assertIsNone(tracker.totals()["averages"])
+        first = dict(prompt=20000, gen=400, stop=1, count=1, e2e_sum=6.0, prefill_sum=2.0, decode_sum=2.0,
+                     queue_sum=0.5, cached=12000)
+        tracker.update(snapshot(running=1, prompt=20000, gen=100), now=101.0)
+        tracker.update(snapshot(**first), now=102.0)
+        averages = tracker.totals()["averages"]
+        self.assertEqual((averages["requests"], averages["prompt_tokens"], averages["output_tokens"]), (1, 20000, 400))
+        self.assertEqual(averages["decode_tps"], 200.0)
+        self.assertEqual(averages["prefill_tps"], 4000.0)  # 8,000 new tokens in 2 s
+        self.assertEqual(averages["cache_saved_s"], 3.0)  # 12,000 cached tokens at 4,000 tok/s
+        self.assertEqual((averages["queue_s"], averages["request_s"]), (0.5, 6.0))
+        # A second request is running: its tokens count already, its decode time not yet. The means wait.
+        tracker.update(snapshot(**{**first, "running": 1, "gen": 2400}), now=103.0)
+        self.assertEqual(tracker.totals()["averages"]["decode_tps"], 200.0)
+
     def test_live_speed_activity_and_request_row(self):
         tracker = metrics.Tracker()
         tracker.update(snapshot(), now=100.0)

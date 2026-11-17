@@ -558,9 +558,9 @@ class RamCacheTests(TempData):
         station.supervisor.state = "ready"
         self.assertEqual(station.settings_json()["limits"]["ram_cache_gib"], [0, config_module.MAX_RAM_CACHE_GIB])
         self.assertEqual(station.save_settings({"ram_cache_gib": 24})["pending"], ["ram_cache_gib"])
-        self.assertNotIn("RAM", station.state_json()["model"]["subtitle"])
+        self.assertEqual(station.state_json()["model"]["ram_cache_gib"], 0)
         station.supervisor.before_start()
-        self.assertTrue(station.state_json()["model"]["subtitle"].endswith(", 24 GiB of RAM for sessions"))
+        self.assertEqual(station.state_json()["model"]["ram_cache_gib"], 24)  # the page names it after the slots
         self.assertEqual(load_config(str(station.settings_file)).ram_cache_gib, 24)
 
 

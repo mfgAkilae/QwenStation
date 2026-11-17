@@ -234,6 +234,36 @@ class Tracker:
             "accept_length": _round(1 + snapshot["accepted_tokens"] / drafts, 2) if drafts else None,
             "accept_per_pos": per_pos,
             "finish": {key: int(value) for key, value in snapshot.get("finish", {}).items()},
+            "averages": self._averages(),
+        }
+
+    def _averages(self) -> dict | None:
+        """Means over the finished requests since the server started.
+
+        From the counters as they stood at the last finished request: while a request runs, its tokens are
+        already counted but its decode time is not, which would inflate the speed."""
+        done = self._mark
+        if not done or not done["requests"]:
+            return None
+        requests = done["requests"]
+        prompt, output = done["prompt_tokens"], done["generation_tokens"]
+        cached = done.get("cached_tokens")
+        read = prompt - (cached or 0)
+        prefill_tps = _ratio(read, done["prefill_sum"]) if read > 0 else None
+        return {
+            "requests": int(requests),
+            "prompt_tokens": round(prompt / requests),
+            "output_tokens": round(output / requests),
+            # Per request: with several slots the requests overlap, and their decode times add up.
+            "decode_tps": _round(_ratio(output, done["decode_sum"]), 1),
+            "prefill_tps": _round(prefill_tps, 0),
+            "queue_s": _round(_ratio(done["queue_sum"], requests)),
+            "request_s": _round(_ratio(done["e2e_sum"], done["e2e_count"]), 2),
+            "prompt_total": int(prompt),
+            "output_total": int(output),
+            "cached_total": int(cached) if cached is not None else None,
+            # How long reading the tokens that came from the cache would have taken at the measured speed.
+            "cache_saved_s": _round(cached / prefill_tps, 1) if cached and prefill_tps else None,
         }
 
 

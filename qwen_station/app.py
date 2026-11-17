@@ -24,6 +24,8 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__, installer, metrics
 from .config import (MODEL_ID, MODEL_SUBTITLE, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
                      resource_path)
+from . import settings
+from .config import save_settings, settings_path
 from .gpu import GpuMonitor
 from .setup import make_setup, uninstall_message
 from .supervisor import Supervisor, http_get
@@ -59,10 +61,18 @@ class Station:
         self._metric_failures = 0
         self._lock = threading.Lock()
         self.httpd: ThreadingHTTPServer | None = None
+        # Settings saved in the dashboard. Model settings wait in `pending` while the model runs and are
+        # applied before its next start; the dashboard's own port waits in `after_restart` for the next app start.
+        self.settings_file = Path(config.config_path) if config.config_path else settings_path()
+        self.pending: dict = {}
+        self.after_restart: dict = {}
+        self._settings_lock = threading.Lock()
+        self.supervisor.before_start = self.apply_pending
 
     # ---- polling -----------------------------------------------------------------
 
     def start_background(self) -> None:
+        settings.local_addresses()  # starts the lookup, so the settings open without a wait
         self.gpu.start()
         threading.Thread(target=self._poll_loop, name="poller", daemon=True).start()
 
@@ -80,7 +90,7 @@ class Station:
     def poll_once(self, tick: int = 0) -> None:
         supervisor = self.supervisor
         state = supervisor.state
-        base = f"http://127.0.0.1:{self.config.api_port}"
+        base = f"http://{self.config.local_host}:{self.config.api_port}"
         if supervisor.generation != self._generation:
             self._generation = supervisor.generation
             self.tracker.reset()
@@ -141,7 +151,11 @@ class Station:
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "subtitle": MODEL_SUBTITLE,
                       "context": snapshot["context"],
                       "max_seqs": preset["max_seqs"]},
-            "api": {"base_url": self.config.api_base_url, "model": MODEL_ID},
+            # The key itself never leaves the app again once it is saved; a hint tells that one is set.
+            "api": {"base_url": self.config.api_base_url, "network_url": settings.network_url(self.config),
+                    "host": self.config.bind_host, "key_hint": settings.key_hint(self.config.api_key),
+                    "model": MODEL_ID},
+            "settings_pending": sorted(self.pending),
             "presets": {name: {key: values[key] for key in ("label", "context", "max_seqs", "note")}
                         for name, values in PRESETS.items()},
             **snapshot,
@@ -160,6 +174,72 @@ class Station:
         }
 
     # ---- window --------------------------------------------------------------------
+
+    # ---- settings ----------------------------------------------------------------
+
+    def _model_busy(self) -> bool:
+        return self.supervisor.state in ("preflight", "starting", "ready", "stopping")
+
+    def settings_json(self) -> dict:
+        with self._settings_lock:
+            saved = {**settings.values(self.config), **self.after_restart, **self.pending}
+            pending, after_restart = sorted(self.pending), sorted(self.after_restart)
+        # The key is shown once, by the page that generated it. From here on only a hint leaves the app.
+        key = saved.pop("api_key")
+        return {"values": saved, "key_hint": settings.key_hint(key), "pending": pending, "after_restart": after_restart,
+                "addresses": settings.local_addresses(), "primary": settings.primary_address(),
+                "running": self._model_busy(), "platform": self.setup.platform, "mode": self.config.mode,
+                "model": MODEL_ID,
+                "file": "" if self.config.mock else str(self.settings_file),
+                "limits": {"draft_tokens": [settings.DEFAULT_DRAFT_TOKENS, settings.MAX_DRAFT_TOKENS],
+                           "port": [settings.MIN_PORT, 65535]}}
+
+    def save_settings(self, changes: dict) -> dict:
+        """Check and store changed settings. Returns what the dashboard needs to tell the user."""
+        with self._settings_lock:
+            saved = {**settings.values(self.config), **self.after_restart, **self.pending}
+            merged, error, field_name = settings.validate(self.config, saved, changes)
+            if error:
+                return {"ok": False, "error": error, "field": field_name}
+            changed = {key: value for key, value in merged.items() if saved[key] != value}
+            if changed and not self.config.mock:  # the mock is for trying the dashboard: nothing is written
+                try:
+                    save_settings(changed, self.settings_file)
+                except (OSError, ValueError) as exc:
+                    return {"ok": False, "error": f"The settings file could not be written: {exc}", "field": ""}
+            busy = self._model_busy()
+            if not busy:  # the model stopped since they were saved: nothing to wait for any more
+                for key, value in self.pending.items():
+                    setattr(self.config, key, value)
+                self.pending = {}
+            for key, value in changed.items():
+                if key in settings.RESTART_KEYS:
+                    self.after_restart[key] = value
+                elif key in settings.MODEL_KEYS and busy:
+                    self.pending[key] = value
+                else:
+                    setattr(self.config, key, value)
+            live = settings.values(self.config)
+            self.pending = {key: value for key, value in self.pending.items() if live[key] != value}
+            self.after_restart = {key: value for key, value in self.after_restart.items() if live[key] != value}
+            if changed:
+                self.supervisor.log.add("--- Settings saved: " + ", ".join(sorted(changed)), "step")
+            return {"ok": True, "changed": sorted(changed), "pending": sorted(self.pending),
+                    "after_restart": sorted(self.after_restart)}
+
+    def apply_pending(self) -> None:
+        """Called before every start of the model: the settings saved while it ran now take effect."""
+        with self._settings_lock:
+            for key, value in self.pending.items():
+                setattr(self.config, key, value)
+            self.pending = {}
+
+    def restart_model(self) -> None:
+        self.supervisor.stop()
+        # The driver needs a moment to give the VRAM back; a start that measures too early shrinks the context.
+        self.quit_event.wait(3.0)
+        if not self.quit_event.is_set():
+            self.supervisor.start()
 
     @property
     def url(self) -> str:
@@ -395,6 +475,11 @@ class _Handler(BaseHTTPRequestHandler):
                     return 0.0
 
             self._json(200, self.station.state_json(number("since"), int(number("log")), int(number("req"))))
+        elif url.path == "/api/settings":
+            if self.headers.get("X-Station-Token") != self.station.token:
+                self._send(403, b"Forbidden", "text/plain")
+                return
+            self._json(200, self.station.settings_json())
         elif url.path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
         else:
@@ -462,6 +547,18 @@ class _Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/stop":
             threading.Thread(target=supervisor.stop, name="stop", daemon=True).start()
             self._json(200, {"ok": True})
+        elif url.path == "/api/settings":
+            changes = payload.get("values")
+            if not isinstance(changes, dict):
+                self._json(400, {"error": "values must be an object"})
+                return
+            self._json(200, station.save_settings(changes))
+        elif url.path == "/api/restart":
+            if station.setup.state not in ("off", "done"):
+                self._json(409, {"error": "Finish the setup first"})
+                return
+            threading.Thread(target=station.restart_model, name="restart", daemon=True).start()
+            self._json(200, {"ok": True})
         elif url.path == "/api/quit":
             self._json(200, {"ok": True})
             station.quit_event.set()
@@ -502,7 +599,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", help="Path to a qwen-station.json")
     parser.add_argument("--root", help="Folder with the models and start scripts")
     parser.add_argument("--preset", choices=sorted(PRESETS))
-    parser.add_argument("--lan", action="store_true", default=None, help="Share the API on the LAN (0.0.0.0 plus Windows forwarding)")
+    parser.add_argument("--api-host", dest="api_host",
+                        help="Address the API listens on: 127.0.0.1 (default), 0.0.0.0 or one address of this machine")
+    parser.add_argument("--lan", action="store_true", default=None, help="The same as --api-host 0.0.0.0")
     parser.add_argument("--port", type=int, dest="station_port", help="Port of the dashboard")
     parser.add_argument("--api-port", type=int, dest="api_port", help="Port of the vLLM API")
     parser.add_argument("--no-autostart", action="store_false", dest="autostart", default=None)
@@ -547,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s")
     try:
         overrides = {key: getattr(args, key) for key in
-                     ("root", "preset", "lan", "station_port", "api_port", "autostart", "open_window", "close_action",
+                     ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
+                      "close_action",
                       "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens",
                       "register_clients")}
         config = load_config(args.config, overrides)

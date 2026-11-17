@@ -27,7 +27,7 @@ import make_icon
 
 ROOT = Path(__file__).resolve().parent
 TEXT = {".py", ".sh", ".env", ".html", ".json"}  # stored with LF line endings, whatever the checkout did
-SKIP_NAMES = {"__pycache__", "setup-qwen-lan.ps1"}  # the LAN script is for Windows port forwarding only
+SKIP_NAMES = {"__pycache__", "setup-qwen-lan.ps1"}  # the script for the Windows firewall
 
 # python-build-standalone: runs from any folder and on any distribution with glibc 2.17 or newer.
 PYTHON_URL = ("https://github.com/astral-sh/python-build-standalone/releases/download/20261110/"

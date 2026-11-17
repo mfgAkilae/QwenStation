@@ -18,13 +18,16 @@ from collections import deque
 from pathlib import Path
 
 from . import clients, gpu
-from .config import (DEFAULT_DRAFT_TOKENS, DRAFTER_DIR, MODEL_ID, PRESETS, TARGET_DIR, WRAPPER_SCRIPT, Config,
+from .relay import Relay
+from .config import (ANY_HOST, DEFAULT_DRAFT_TOKENS, DRAFTER_DIR, KEY_FILE, LOCAL_HOST, MODEL_ID, PRESETS, TARGET_DIR,
+                     WRAPPER_SCRIPT, Config,
                      app_dir, data_dir,
                      resource_path)
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 READY_MARKER = "Application startup complete."
 LAN_SCRIPT = "setup-qwen-lan.ps1"
+LAN_STATE = "setup-qwen-lan.state.json"  # written by the script next to itself, in logs/
 # Shortfall the start tolerates. Measured 2026-11-16: 26.7 GiB free worked (Windows evicted other
 # programs' GPU memory), but the start took 9 minutes instead of 4.
 VRAM_TOLERANCE_MIB = 3072  # only used when fit_context is off
@@ -103,8 +106,9 @@ _HINTS = (
 )
 
 
-def http_get(url: str, timeout: float = 2.0) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, headers={"Accept": "*/*"})
+def http_get(url: str, timeout: float = 2.0, key: str = "") -> tuple[int, bytes]:
+    headers = {"Accept": "*/*", **({"Authorization": f"Bearer {key}"} if key else {})}
+    request = urllib.request.Request(url, headers=headers)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never route localhost via a proxy
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -176,7 +180,7 @@ class WslLauncher:
     def command(self, preset: dict) -> list[str]:
         config = self.config
         env = [
-            f"VLLM_HOST={'0.0.0.0' if config.lan else '127.0.0.1'}",
+            f"VLLM_HOST={self.server_host()}",
             f"VLLM_PORT={config.api_port}",
             f"CTX={preset['context']}",
             f"KV_BYTES={preset['kv_bytes']}",
@@ -195,6 +199,11 @@ class WslLauncher:
         env.extend(f"{key}={value}" for key, value in preset.get("env", {}).items())  # e.g. another target
         env.extend(config.extra_env.split())  # KEY=VALUE pairs for the start scripts, e.g. KV_DTYPE=nvfp4
         return [*self.wsl(), "env", *env, *self.script()]
+
+    def server_host(self) -> str:
+        # Inside WSL the server always listens on 127.0.0.1, which Windows forwards to its own 127.0.0.1.
+        # Other devices come in through the relay in this app (relay.py).
+        return LOCAL_HOST
 
     def wsl(self) -> list[str]:
         return ["wsl.exe", "-d", self.config.distro, "--exec"]
@@ -325,6 +334,9 @@ class NativeLauncher(ManagedLauncher):
     host_label = "System"
     gpu_index: int | None = None  # set by the preflight: the card that matched, in PCI bus order
 
+    def server_host(self) -> str:
+        return self.config.bind_host  # no forwarding in between: the server binds the address itself
+
     def wsl(self) -> list[str]:
         return []
 
@@ -402,10 +414,14 @@ class Supervisor:
         self._op_lock = threading.Lock()
         self._stopping = False
         self._closed = False  # set on shutdown: a start still in its checks must not launch a server
+        self.before_start = None  # called before the checks of every start: the station applies saved settings
+        self._relay: Relay | None = None  # Windows: passes connections from other devices on to the server in WSL
 
     # ---- state -----------------------------------------------------------------
 
     def _set_state(self, state: str, message: str = "") -> None:
+        if state != "ready":
+            self._unshare()
         with self._lock:
             if state != self.state:
                 self.state = state
@@ -458,7 +474,8 @@ class Supervisor:
     def probe_api(self) -> tuple[str, dict | None]:
         """'free', 'ours' (this model already answers) or 'foreign' (something else owns the port)."""
         try:
-            status, body = http_get(f"http://127.0.0.1:{self.config.api_port}/v1/models", timeout=2.0)
+            status, body = http_get(f"http://{self.config.local_host}:{self.config.api_port}/v1/models", timeout=2.0,
+                                    key=self.config.api_key)
         except (OSError, urllib.error.URLError):
             return "free", None
         if status == 200:
@@ -564,6 +581,8 @@ class Supervisor:
     def _start_worker(self, force: bool) -> None:
         with self._op_lock:
             try:
+                if self.before_start:
+                    self.before_start()
                 self._start(force)
             except Exception as exc:  # a crash here must end in a visible state, not a silent thread death
                 self.log.add(f"Start aborted: {exc!r}", "error")
@@ -601,13 +620,8 @@ class Supervisor:
                               "detail": reason, "forceable": not blocking}
             self._set_state("blocked", reason)
             return
-        if self.config.lan and not self.config.mock:
-            if self.config.mode == "native":
-                self.log.add(f"--- LAN: the API listens on all interfaces, port {self.config.api_port}. "
-                             "It has no authentication; open the port in your firewall only for a trusted network.",
-                             "step")
-            else:
-                self._ensure_lan()
+        if not self.config.mock:
+            self._prepare_network()
         with self._lock:
             self.generation += 1
             self.facts = {}
@@ -628,7 +642,7 @@ class Supervisor:
             # stops the server in order.
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        stdin=subprocess.DEVNULL, creationflags=NO_WINDOW,
-                                       start_new_session=os.name != "nt")
+                                       start_new_session=os.name != "nt", env=self._server_environment())
         except OSError as exc:
             self._fail(f"The start command could not be run: {exc}")
             return
@@ -636,6 +650,18 @@ class Supervisor:
             self._process = process
         self._set_state("starting", "Loading the model")
         threading.Thread(target=self._read_output, args=(process,), name="server-log", daemon=True).start()
+
+    def _server_environment(self) -> dict:
+        """The environment of the server process. The API key travels here, never on a command line:
+        vLLM reads VLLM_API_KEY, and WSLENV carries the variable from Windows into the distribution."""
+        environment = dict(os.environ)
+        environment.pop("VLLM_API_KEY", None)  # only the setting decides, not what the desktop happens to export
+        if self.config.api_key:
+            environment["VLLM_API_KEY"] = self.config.api_key
+            if os.name == "nt":
+                carried = [name for name in environment.get("WSLENV", "").split(":") if name]
+                environment["WSLENV"] = ":".join([*carried, "VLLM_API_KEY/u"])
+        return environment
 
     def _adopt(self, card: dict) -> None:
         context = card.get("max_model_len")
@@ -655,11 +681,13 @@ class Supervisor:
         if self.config.register_clients and not self.config.mock:
             self.refresh_clients(write=True)
         self._set_state("ready", "Already running, started elsewhere")
+        self._share()
 
     def refresh_clients(self, write: bool) -> None:
         preset = self.effective_preset()
         result = clients.register_all(self.config.api_base_url, preset["context"], preset["max_seqs"],
-                                      dry_run=not write, variant=preset.get("variant", ""))
+                                      dry_run=not write, variant=preset.get("variant", ""),
+                                      api_key=self.config.api_key, key_file=data_dir() / KEY_FILE)
         for entry in result.values():
             if entry.get("changed"):
                 self.log.add(f"--- {entry['client']}: model {entry['model']} {entry['detail']} ({entry['path']})", "step")
@@ -668,9 +696,40 @@ class Supervisor:
         with self._lock:
             self.clients = result
 
+    def _prepare_network(self) -> None:
+        """Before the server starts: open the firewall for the chosen address, or take an earlier rule back."""
+        config = self.config
+        where = "all network interfaces" if config.bind_host == ANY_HOST else config.bind_host
+        guard = ("Clients need the API key." if config.api_key
+                 else "The API has no key: anyone who reaches it can use the model.")
+        if config.mode == "native":
+            if config.shared:
+                self.log.add(f"--- Network: the API listens on {where}, port {config.api_port}. {guard} "
+                             "Opening the port in your firewall is up to you.", "step")
+            return
+        try:
+            script = self._lan_script()
+            state = Path(script).parent / "logs" / LAN_STATE
+            if not config.shared:
+                if state.is_file():
+                    self.log.add("--- Network: the API is for this computer only again. Windows asks for "
+                                 "administrator rights (UAC) to remove the firewall rule.", "step")
+                    self._run_lan_script(script, ["-Remove"], elevated=True)
+                    self.log.add("--- Network: firewall rule removed.", "step")
+                return
+            target = ["-ListenAddress", config.bind_host, "-Port8000", str(config.api_port)]
+            if self._run_lan_script(script, ["-Check", *target], elevated=False) == 0:
+                self.log.add(f"--- Network: the firewall is open for {where}, port {config.api_port}.", "step")
+                return
+            self.log.add(f"--- Network: sharing the API on {where}, port {config.api_port}. Windows asks for "
+                         "administrator rights (UAC) once, for the firewall rule.", "step")
+            self._run_lan_script(script, target, elevated=True)
+            self.log.add(f"--- Network: the firewall rule is set up. {guard}", "step")
+        except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            self.log.add(f"The firewall rule was not set up ({exc}). The model starts anyway; other devices may "
+                         "not get through.", "warn")
+
     def _lan_script(self) -> str:
-        if self.config.mode != "managed":
-            return str(Path(self.config.root) / LAN_SCRIPT)
         # The script keeps its state next to itself, so it needs a folder that outlives this process.
         source = resource_path(LAN_SCRIPT)
         target = data_dir() / LAN_SCRIPT
@@ -679,26 +738,24 @@ class Supervisor:
         (data_dir() / "logs").mkdir(exist_ok=True)
         return str(target)
 
-    def _ensure_lan(self) -> None:
+    def _run_lan_script(self, script: str, arguments: list[str], elevated: bool) -> int:
+        """Run the network script. Elevated, a failure (also a declined UAC prompt) raises RuntimeError."""
         base = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass"]
-        try:
-            setup = self._lan_script()
-            check = subprocess.run([*base, "-File", setup, "-Check", "-Distro", self.config.distro],
-                                   capture_output=True, timeout=120, creationflags=NO_WINDOW)
-            if check.returncode == 0:
-                self.log.add("--- LAN access is set up.", "step")
-                return
-            self.log.add("--- LAN access is missing: Windows asks for administrator rights (UAC).", "step")
-            arguments = f'-NoProfile -ExecutionPolicy Bypass -File "{setup}" -Distro "{self.config.distro}"'
-            elevate = ("$p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden "
-                       f"-ArgumentList '{arguments}' -Wait -PassThru; exit $p.ExitCode")
-            result = subprocess.run([*base, "-Command", elevate], capture_output=True, timeout=300,
-                                    creationflags=NO_WINDOW)
-            if result.returncode != 0:
-                raise RuntimeError(f"Exit code {result.returncode}")
-            self.log.add("--- LAN access set up.", "step")
-        except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
-            self.log.add(f"LAN access incomplete ({exc}). The local endpoint starts anyway.", "warn")
+        if not elevated:
+            return subprocess.run([*base, "-File", script, *arguments], capture_output=True, timeout=120,
+                                  creationflags=NO_WINDOW).returncode
+        # One string for Start-Process: every part in double quotes, inside a single-quoted PowerShell string.
+        quoted = " ".join('"' + part.replace("'", "''") + '"' for part in ("-NoProfile", "-ExecutionPolicy",
+                                                                           "Bypass", "-File", script, *arguments))
+        elevate = ("try { $p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden "
+                   f"-ArgumentList '{quoted}' -Wait -PassThru; exit $p.ExitCode }} catch {{ exit 1223 }}")
+        code = subprocess.run([*base, "-Command", elevate], capture_output=True, timeout=300,
+                              creationflags=NO_WINDOW).returncode
+        if code == 1223:
+            raise RuntimeError("the administrator prompt was declined")
+        if code != 0:
+            raise RuntimeError(f"exit code {code}")
+        return code
 
     # ---- output ------------------------------------------------------------------
 
@@ -773,6 +830,30 @@ class Supervisor:
         self.log.add(f"=== Ready after {self.ready_at - (self.started_at or self.ready_at):.0f} s. "
                      f"API: {self.config.api_base_url}", "step")
         self._set_state("ready", "Ready")
+        self._share()
+
+    def _share(self) -> None:
+        """Windows, the model is up: start passing connections from other devices on to it."""
+        config = self.config
+        if config.mock or config.mode == "native" or not config.shared:
+            return  # on Linux the server binds the chosen address itself
+        relay = Relay(config.bind_host, config.api_port)
+        try:
+            relay.start()
+        except OSError as exc:
+            self.log.add(f"The API could not be shared on {config.bind_host}, port {config.api_port}: {exc}. "
+                         "This computer still reaches it.", "warn")
+            return
+        with self._lock:
+            self._relay = relay
+        where = "every address of this computer" if config.bind_host == ANY_HOST else config.bind_host
+        self.log.add(f"--- Network: other devices reach the API on {where}, port {config.api_port}.", "step")
+
+    def _unshare(self) -> None:
+        with self._lock:
+            relay, self._relay = self._relay, None
+        if relay is not None:
+            relay.stop()
 
     def _process_ended(self, process: subprocess.Popen, code: int) -> None:
         with self._lock:
@@ -803,9 +884,12 @@ class Supervisor:
                 return False
             self._stopping = True
             process = self._process
+            relay, self._relay = self._relay, None
             self.state = "stopping"
             self.state_since = time.time()
             self.message = "Stopping the model"
+        if relay is not None:
+            relay.stop()
         self.log.add("=== Stopping the server", "step")
         with self._op_lock:
             self.launcher.stop(process, self.log)

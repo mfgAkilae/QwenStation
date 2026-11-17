@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +29,10 @@ OUTPUT_LIMIT = 32768
 # Draft tokens per round of the DFlash2 drafter. 7 is its trained block; more helps predictable text
 # (reasoning, code) and costs KV memory, so context. Measured up to 15, see docs/engine-notes.md.
 DEFAULT_DRAFT_TOKENS = 7
+LOCAL_HOST = "127.0.0.1"  # the API answers this machine only
+ANY_HOST = "0.0.0.0"      # the API listens on every network interface
+API_KEY_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{8,128}")  # what fits into an Authorization header as it is
+KEY_FILE = "api-key"  # the key again, alone in a file of the data folder: OpenCode reads it from there
 MAX_DRAFT_TOKENS = 15
 
 # "context" includes the generated output.
@@ -79,7 +85,9 @@ class Config:
     root: str = DEFAULT_ROOT
     distro: str = DEFAULT_DISTRO
     preset: str = "262k"
-    lan: bool = False
+    lan: bool = False  # older switch: the same as api_host "0.0.0.0"
+    api_host: str = ""  # where the API listens: 127.0.0.1, 0.0.0.0 or one address of this machine. Empty: by `lan`
+    api_key: str = ""  # clients must send it as "Authorization: Bearer <key>". Empty: the API is open
     api_port: int = 8000
     station_port: int = 8010
     autostart: bool = True
@@ -103,8 +111,27 @@ class Config:
         return windows_to_wsl_path(self.root)
 
     @property
+    def bind_host(self) -> str:
+        """The address the API listens on."""
+        return self.api_host or (ANY_HOST if self.lan else LOCAL_HOST)
+
+    @property
+    def shared(self) -> bool:
+        """True when other devices can reach the API."""
+        return self.bind_host != LOCAL_HOST
+
+    @property
+    def local_host(self) -> str:
+        """The address this machine itself reaches the API at.
+
+        On Linux a server bound to one address does not answer on 127.0.0.1. Inside WSL the server always
+        listens on 127.0.0.1, which Windows forwards; other devices come in through the relay of the app."""
+        host = self.bind_host
+        return host if self.mode == "native" and not self.mock and host != ANY_HOST else LOCAL_HOST
+
+    @property
     def api_base_url(self) -> str:
-        return f"http://127.0.0.1:{self.api_port}/v1"
+        return f"http://{self.local_host}:{self.api_port}/v1"
 
     def validate(self) -> None:
         if self.preset not in PRESETS:
@@ -115,6 +142,13 @@ class Config:
             raise ValueError(f"draft_tokens must be a number from 1 to {MAX_DRAFT_TOKENS}")
         if self.close_action not in ("stop", "keep"):
             raise ValueError("close_action must be 'stop' or 'keep'")
+        if self.api_host:
+            try:
+                ipaddress.IPv4Address(self.api_host)
+            except ValueError:
+                raise ValueError("api_host must be an IPv4 address such as 127.0.0.1, 0.0.0.0 or 192.168.1.20") from None
+        if self.api_key and not API_KEY_PATTERN.fullmatch(self.api_key):
+            raise ValueError("api_key must be 8 to 128 characters: letters, digits and . _ ~ + / = -")
         for name in ("api_port", "station_port"):
             port = getattr(self, name)
             if not isinstance(port, int) or not 1 <= port <= 65535:
@@ -175,6 +209,8 @@ _FILE_KEYS = {
     "distro": str,
     "preset": str,
     "lan": bool,
+    "api_host": str,
+    "api_key": str,
     "api_port": int,
     "station_port": int,
     "autostart": bool,
@@ -197,9 +233,9 @@ def settings_path() -> Path:
     return data_dir() / CONFIG_NAME
 
 
-def save_settings(values: dict) -> Path:
+def save_settings(values: dict, path: Path | None = None) -> Path:
     """Merge values into the settings file."""
-    path = settings_path()
+    path = path or settings_path()
     current: dict = {}
     if path.is_file():
         with path.open("r", encoding="utf-8-sig") as handle:

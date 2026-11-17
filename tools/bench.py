@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import statistics
@@ -96,8 +97,8 @@ def run(args: argparse.Namespace, name: str, kind: str, prompt: str, max_tokens:
             "temperature": args.temperature, "seed": seed, "messages": [{"role": "user", "content": prompt}]}
     if args.reasoning_effort:
         body["reasoning_effort"] = args.reasoning_effort
-    request = urllib.request.Request(f"{args.base}/v1/chat/completions", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {args.api_key}"} if args.api_key else {})}
+    request = urllib.request.Request(f"{args.base}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers)
     before, positions_before = counters(args.base)
     started = time.perf_counter()
     first = last = None
@@ -180,6 +181,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", default="http://127.0.0.1:8000", help="server root, without /v1")
     parser.add_argument("--model", default="qwen38-gittensor-dflash")
+    parser.add_argument("--api-key", default=os.environ.get("QWEN_API_KEY", ""),
+                        help="the API key, if the settings have one (default: the variable QWEN_API_KEY)")
     parser.add_argument("--label", default="", help="a name for this run, stored in the result")
     parser.add_argument("--out", help="write the result as JSON")
     parser.add_argument("--markdown", action="store_true", help="print the summary as a Markdown table")

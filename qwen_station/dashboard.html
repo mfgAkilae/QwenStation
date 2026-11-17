@@ -61,6 +61,7 @@ select:disabled { opacity: .55; cursor: not-allowed; }
 
 .endpoint { margin: 14px 0 16px; display: flex; flex-wrap: wrap; gap: 8px 26px; align-items: center; padding: 9px 14px; border: 1px dashed var(--line); border-radius: 10px; color: var(--ink-2); font-size: 13px; }
 .endpoint code { font: 13px var(--mono); color: var(--ink); user-select: all; }
+#keyHint { user-select: none; }
 .copy { border: 0; background: none; color: var(--data); cursor: pointer; padding: 2px 4px; font-size: 12.5px; border-radius: 4px; }
 .copy:hover { text-decoration: underline; }
 
@@ -184,11 +185,94 @@ ol.how code { font: 12.5px var(--mono); color: var(--ink); }
 .warnline svg { width: 16px; height: 16px; flex: none; color: var(--warn); margin-top: 2px; }
 .banner { display: none; margin-bottom: 14px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--bad); color: var(--bad); background: var(--panel); }
 .mock { color: var(--warn); border: 1px solid var(--warn); border-radius: 6px; padding: 1px 7px; font-size: 12px; }
+/* ---- settings ---- */
+dialog.sheet { width: min(880px, calc(100vw - 32px)); height: min(760px, calc(100vh - 40px)); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); box-shadow: 0 24px 60px rgba(0, 0, 0, .45); overflow: hidden; }
+dialog.sheet[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
+.sheet-head { padding: 15px 24px 14px; border-bottom: 1px solid var(--line); }
+.sheet-head h2 { font: 600 21px/1.1 var(--display); font-stretch: 88%; outline: none; }
+.sheet-main { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 0; }
+.sheet-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px; background: var(--bg); border-right: 1px solid var(--line); min-height: 0; overflow: auto; }
+.sheet-nav button { display: grid; gap: 1px; text-align: left; border: 0; background: none; border-radius: 8px; padding: 9px 12px 10px; cursor: pointer; }
+.sheet-nav button b { font: 600 14.5px var(--display); letter-spacing: .01em; }
+.sheet-nav button span { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-nav button:hover { background: var(--panel-2); }
+.sheet-nav button[aria-selected="true"] { background: var(--panel); box-shadow: inset 3px 0 0 var(--data); }
+.sheet-nav button[aria-selected="true"] span { color: var(--ink-2); }
+.sheet-nav .where { margin-top: auto; padding: 14px 12px 4px; color: var(--ink-3); font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.sheet-pane { overflow: auto; padding: 20px 26px 24px; }
+.sheet-pane h3 { margin: 0; font: 600 17px var(--display); letter-spacing: .01em; }
+.sheet-pane .lead { color: var(--ink-2); font-size: 13px; margin: 3px 0 12px; max-width: 60ch; }
+.sheet input[type="text"], .sheet input[type="number"], .sheet select { height: 34px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); padding: 0 10px; font: 13.5px var(--mono); }
+.sheet input.short { width: 104px; }
+.options { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.option { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 9px 14px; cursor: pointer; }
+.option + .option { border-top: 1px solid var(--line); }
+.option:has(input:checked) { background: var(--data-soft); }
+.option:hover:not(:has(input:checked)) { background: var(--panel-2); }
+.option b { display: block; font-weight: 600; }
+.option small, .row small { display: block; color: var(--ink-2); font-size: 12.5px; }
+.option input[type="radio"] { margin: 0; width: 16px; height: 16px; accent-color: var(--data); }
+.option code { font: 13.5px var(--mono); color: var(--ink-2); }
+.option:has(input:checked) code { color: var(--ink); }
+.option select { max-width: 250px; }
+.under { margin-top: 8px; }
+.under input { width: 100%; }
+.note { color: var(--ink-3); font-size: 12.5px; margin-top: 8px; }
+.rows { margin-top: 16px; border-top: 1px solid var(--line); }
+.rows.first { margin-top: 0; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 22px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.row > div:first-child > label, .row > div:first-child > b { font-weight: 600; }
+.row small { margin-top: 1px; max-width: 54ch; }
+.row.wide { grid-template-columns: minmax(0, 1fr); }
+.row .line { display: flex; gap: 8px; align-items: center; }
+.row .line input { flex: 1; min-width: 0; }
+.sheet .err, .field .err { grid-column: 1 / -1; color: var(--bad); font-size: 12.5px; margin: 6px 0 0; }
+.row .err { margin: 0; }
+[data-invalid] input, [data-invalid] select { border-color: var(--bad) !important; }
+.switch { appearance: none; -webkit-appearance: none; position: relative; width: 40px; height: 22px; margin: 0; border-radius: 11px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; transition: background .15s, border-color .15s; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--ink-3); transition: transform .15s, background .15s; }
+.switch:checked { background: var(--data); border-color: var(--data); }
+.switch:checked::after { transform: translateX(18px); background: var(--panel); }
+.pick label { position: relative; cursor: pointer; }
+.pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.pick span { display: block; padding: 6px 12px; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
+.pick input:checked + span { background: var(--panel-2); color: var(--ink); font-weight: 600; }
+.pick input:focus-visible + span { outline: 2px solid var(--data); outline-offset: -2px; }
+#keyText { color: var(--ink-2); font-size: 13px; white-space: nowrap; }
+#keyText code { font: 13px var(--mono); color: var(--ink); }
+.fresh { grid-column: 1 / -1; padding: 10px 12px; border: 1px solid var(--data); border-radius: 10px; background: var(--data-soft); }
+.fresh code { flex: 1; min-width: 0; font: 13.5px var(--mono); overflow-wrap: anywhere; user-select: all; }
+.fresh p { color: var(--ink-2); font-size: 12.5px; margin-top: 6px; }
+.caution { display: flex; gap: 9px; margin-top: 14px; padding: 9px 13px; border: 1px solid var(--warn); border-radius: 10px; font-size: 13px; }
+.caution svg { width: 16px; height: 16px; flex: none; color: var(--warn); margin-top: 2px; }
+.connect { margin-top: 16px; padding: 12px 14px 4px; border: 1px dashed var(--line); border-radius: 10px; }
+.connect h4 { margin: 0 0 6px; font: 600 14px var(--display); }
+.connect dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 16px; font-size: 13px; }
+.connect dt { color: var(--ink-2); padding: 5px 0; }
+.connect dd { margin: 0; padding: 5px 0; min-width: 0; overflow-wrap: anywhere; }
+.connect code { font: 12.5px var(--mono); color: var(--ink); user-select: all; }
+.sheet-foot { display: flex; align-items: center; gap: 10px; padding: 13px 24px; border-top: 1px solid var(--line); }
+.sheet-foot p { flex: 1; font-size: 13px; color: var(--ink-2); }
+.sheet-foot p[data-tone="bad"] { color: var(--bad); }
+.sheet-foot p[data-tone="good"] { color: var(--good); }
+@media (max-width: 720px) {
+  .sheet-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .sheet-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px; }
+  .sheet-nav button { flex: none; }
+  .sheet-nav button span, .sheet-nav .where { display: none; }
+  .sheet-nav button[aria-selected="true"] { box-shadow: inset 0 -3px 0 var(--data); }
+  .sheet-pane { padding: 16px 16px 20px; }
+  .row, .option { grid-template-columns: minmax(0, 1fr); }
+  .option { grid-template-columns: 18px minmax(0, 1fr); }
+  .option code, .option select { grid-column: 2; }
+  .sheet-foot { flex-wrap: wrap; } .sheet-foot p { flex-basis: 100%; }
+}
 [hidden] { display: none !important; }
 
 @media (max-width: 1080px) { .grid { grid-template-columns: 1fr; } .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .readout .activity { max-width: none; margin-left: 0; text-align: left; } }
 @media (max-width: 760px) { .steps.two { grid-template-columns: 1fr; } }
-@media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } .readout .big { font-size: 50px; } .controls { margin-left: 0; } }
+@media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } .readout .big { font-size: 50px; } .controls { margin-left: 0; flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -218,14 +302,17 @@ ol.how code { font: 12.5px var(--mono); color: var(--ink); }
       <span class="mock" id="mockTag" hidden>Mock server, no model</span>
       <select id="preset" aria-label="Preset"></select>
       <button class="btn primary" id="primary" type="button">Start</button>
+      <button class="btn" id="openSettings" type="button">Settings</button>
       <button class="btn" id="quit" type="button" title="Stop the model and close Qwen Station">Quit</button>
     </div>
   </header>
 
   <div class="endpoint">
     <span>API <code id="baseUrl"></code> <button class="copy" data-copy="baseUrl" type="button">Copy</button></span>
+    <span id="netSpan" hidden>On the network <code id="netUrl"></code> <button class="copy" data-copy="netUrl" type="button">Copy</button></span>
     <span>Model <code id="modelId"></code> <button class="copy" data-copy="modelId" type="button">Copy</button></span>
-    <span>API key: none needed. If a client asks for one, use <code>local</code>.</span>
+    <span id="keyNone">API key: none needed. If a client asks for one, use <code>local</code>.</span>
+    <span id="keySet" hidden>API key: set (<code id="keyHint"></code>). It was shown once, when it was generated.</span>
   </div>
 
   <div class="warnline" id="warnline" role="status" hidden><svg aria-hidden="true"><use href="#i-warn"/></svg><span id="warnText"></span></div>
@@ -280,6 +367,125 @@ ol.how code { font: 12.5px var(--mono); color: var(--ink); }
     </section>
   </main>
 </div>
+<dialog class="sheet" id="settings" aria-labelledby="settingsTitle">
+  <div class="sheet-head"><h2 id="settingsTitle" tabindex="-1" autofocus>Settings</h2></div>
+  <div class="sheet-main">
+    <div class="sheet-nav" role="tablist" aria-orientation="vertical" aria-label="Areas">
+      <button type="button" role="tab" id="tab-api" data-tab="api" aria-controls="pane-api"><b>API</b><span id="sumApi"></span></button>
+      <button type="button" role="tab" id="tab-model" data-tab="model" aria-controls="pane-model"><b>Model</b><span id="sumModel"></span></button>
+      <button type="button" role="tab" id="tab-app" data-tab="app" aria-controls="pane-app"><b>Window and app</b><span id="sumApp"></span></button>
+      <button type="button" role="tab" id="tab-lab" data-tab="lab" aria-controls="pane-lab"><b>Experiments</b><span id="sumLab"></span></button>
+      <p class="where" id="settingsFile"></p>
+    </div>
+
+    <div class="sheet-pane" role="tabpanel" id="pane-api" data-pane="api" aria-labelledby="tab-api">
+      <h3 id="reachTitle">Who can reach the API</h3>
+      <p class="lead">The address the model's API listens on.</p>
+      <div data-key="api_host">
+        <div class="options" role="radiogroup" aria-labelledby="reachTitle">
+          <label class="option"><input type="radio" name="reach" value="local"><span><b>This computer only</b><small>Nothing else can connect.</small></span><code>127.0.0.1</code></label>
+          <label class="option"><input type="radio" name="reach" value="all"><span><b>Every network this computer is on</b><small>LAN, VPN and all other network interfaces.</small></span><code>0.0.0.0</code></label>
+          <label class="option"><input type="radio" name="reach" value="one"><span><b>One address of this computer</b><small>Only devices that reach this address.</small></span><select id="address" aria-label="Address of this computer"></select></label>
+        </div>
+        <div class="under" id="otherField" hidden><input id="addressOther" type="text" inputmode="decimal" spellcheck="false" autocomplete="off" placeholder="192.168.1.20" aria-label="Another address"></div>
+        <p class="err" hidden></p>
+      </div>
+      <p class="note" id="reachWindows" hidden>Windows asks for administrator rights once, to add the firewall rule.</p>
+
+      <div class="rows">
+        <div class="row" data-key="api_port">
+          <div><label for="apiPort">Port</label></div>
+          <input class="short" id="apiPort" type="number" inputmode="numeric">
+          <p class="err" hidden></p>
+        </div>
+        <div class="row" data-key="api_key">
+          <div><b>API key</b><small>Clients send it with every request. Without a key, anyone who reaches the address can use the model.</small></div>
+          <div class="line">
+            <span id="keyText"></span>
+            <button class="btn" id="keyNew" type="button">Generate a key</button>
+            <button class="btn" id="keyClear" type="button">Remove</button>
+          </div>
+          <div class="fresh" id="keyFresh" hidden>
+            <div class="line"><code id="keyValue"></code><button class="btn primary" id="keyCopy" type="button">Copy</button></div>
+            <p>Copy the key now. After you save and close this window, it cannot be shown again.</p>
+          </div>
+          <p class="err" hidden></p>
+        </div>
+      </div>
+      <div class="caution" id="reachCaution" hidden><svg aria-hidden="true"><use href="#i-warn"/></svg><span>Shared without a key: anyone who can reach this address can use the model. Generate a key above.</span></div>
+      <div class="connect">
+        <h4>What a client needs</h4>
+        <dl id="connectList"></dl>
+      </div>
+    </div>
+
+    <div class="sheet-pane" role="tabpanel" id="pane-model" data-pane="model" aria-labelledby="tab-model" hidden>
+      <h3>Model</h3>
+      <p class="lead">How the model starts. The preset, with the context size, is in the header of the window.</p>
+      <div class="rows first">
+        <div class="row" data-key="draft_tokens">
+          <div><label for="draftTokens">Draft tokens per round</label><small>7 is what the drafter was trained for. More makes reasoning faster; each extra token costs about 5,400 tokens of context.</small></div>
+          <input class="short" id="draftTokens" type="number" inputmode="numeric">
+          <p class="err" hidden></p>
+        </div>
+        <div class="row">
+          <div><label for="fitContext">Fit the context to the free VRAM</label><small>When other programs hold VRAM, the model starts with a smaller context instead of not at all.</small></div>
+          <input class="switch" id="fitContext" type="checkbox" role="switch">
+        </div>
+        <div class="row">
+          <div><label for="autostart">Start the model with the app</label><small>Loads the model as soon as Qwen Station opens.</small></div>
+          <input class="switch" id="autostart" type="checkbox" role="switch">
+        </div>
+      </div>
+    </div>
+
+    <div class="sheet-pane" role="tabpanel" id="pane-app" data-pane="app" aria-labelledby="tab-app" hidden>
+      <h3>Window and app</h3>
+      <p class="lead">What Qwen Station itself does.</p>
+      <div class="rows first">
+        <div class="row" data-key="close_action">
+          <div><b id="closeTitle">When the window closes</b><small>Kept running, the model stays loaded until you choose Quit.</small></div>
+          <div class="seg pick" role="radiogroup" aria-labelledby="closeTitle">
+            <label><input type="radio" name="closeAction" value="stop"><span>Stop the model</span></label>
+            <label><input type="radio" name="closeAction" value="keep"><span>Keep it running</span></label>
+          </div>
+        </div>
+        <div class="row">
+          <div><label for="registerClients">Register the model in OpenCode and Pi</label><small>Writes the model, its address and its key into their configs at every start.</small></div>
+          <input class="switch" id="registerClients" type="checkbox" role="switch">
+        </div>
+        <div class="row" data-key="station_port">
+          <div><label for="stationPort">Port of this dashboard</label><small>Applies the next time Qwen Station starts.</small></div>
+          <input class="short" id="stationPort" type="number" inputmode="numeric">
+          <p class="err" hidden></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="sheet-pane" role="tabpanel" id="pane-lab" data-pane="lab" aria-labelledby="tab-lab" hidden>
+      <h3>Experiments</h3>
+      <p class="lead">Passed to the server as they are. Leave both empty unless you are testing something.</p>
+      <div class="rows first">
+        <div class="row wide" data-key="extra_args">
+          <div><label for="extraArgs">Extra arguments for <code>vllm serve</code></label></div>
+          <div class="line"><input id="extraArgs" type="text" spellcheck="false" autocomplete="off"></div>
+          <p class="err" hidden></p>
+        </div>
+        <div class="row wide" data-key="extra_env">
+          <div><label for="extraEnv">Extra environment for the start script</label></div>
+          <div class="line"><input id="extraEnv" type="text" spellcheck="false" autocomplete="off" placeholder="KEY=VALUE KEY2=VALUE2"></div>
+          <p class="err" hidden></p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="sheet-foot">
+    <p id="settingsMessage" role="status"></p>
+    <button class="btn" id="settingsCancel" type="button">Cancel</button>
+    <button class="btn primary" id="settingsRestart" type="button" hidden>Restart the model now</button>
+    <button class="btn primary" id="settingsSave" type="button">Save</button>
+  </div>
+</dialog>
 <div class="tip" id="tip" role="tooltip"></div>
 
 <script>
@@ -381,8 +587,14 @@ function render() {
   $("baseUrl").textContent = s.api.base_url;
   $("modelId").textContent = s.api.model;
   $("mockTag").hidden = !s.station.mock;
-  $("warnline").hidden = !s.warning;
-  $("warnText").textContent = s.warning || "";
+  $("netSpan").hidden = !s.api.network_url;
+  $("keyNone").hidden = !!s.api.key_hint;
+  $("keySet").hidden = !s.api.key_hint;
+  $("keyHint").textContent = s.api.key_hint;
+  $("netUrl").textContent = s.api.network_url || "";
+  const waiting = s.settings_pending && s.settings_pending.length ? "Changed settings apply when the model starts again." : "";
+  $("warnline").hidden = !(s.warning || waiting);
+  $("warnText").textContent = s.warning || waiting;
 
   const select = $("preset");
   if (!select.options.length) {
@@ -838,12 +1050,187 @@ $("quit").addEventListener("click", async () => {
 });
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy]");
-  if (!button) return;
-  navigator.clipboard.writeText($(button.dataset.copy).textContent).then(() => {
-    button.textContent = "Copied";
-    setTimeout(() => { button.textContent = "Copy"; }, 1400);
-  });
+  if (button) copyText(button, $(button.dataset.copy).textContent);
 });
+/* ---------- settings ---------- */
+const sheet = $("settings");
+let settingsData = null;
+// The key in the form: undefined = as it is saved, "" = remove it, anything else = a new one, shown this once.
+let keyDraft;
+const LOCAL = "127.0.0.1", ANY = "0.0.0.0";
+const radio = (name) => (sheet.querySelector(`input[name="${name}"]:checked`) || {}).value;
+const setRadio = (name, value) => { for (const input of sheet.querySelectorAll(`input[name="${name}"]`)) input.checked = input.value === value; };
+
+function showPane(name) {
+  for (const tab of sheet.querySelectorAll("[data-tab]")) {
+    const on = tab.dataset.tab === name;
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+  }
+  for (const pane of sheet.querySelectorAll("[data-pane]")) pane.hidden = pane.dataset.pane !== name;
+}
+function chosenHost() {
+  const reach = radio("reach");
+  if (reach === "local") return LOCAL;
+  if (reach === "all") return ANY;
+  return $("address").value === "other" ? $("addressOther").value.trim() : $("address").value;
+}
+function newKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return "qs-" + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+// Everything that follows from the values in the form: hidden parts, the summaries on the left, the client box.
+function updateSettings() {
+  const reach = radio("reach"), host = chosenHost(), port = $("apiPort").value;
+  const shared = reach !== "local", hint = settingsData.key_hint;
+  const key = keyDraft === undefined ? !!hint : !!keyDraft;  // will a key be set after saving?
+  $("otherField").hidden = !(reach === "one" && $("address").value === "other");
+  $("reachWindows").hidden = !(shared && settingsData.platform === "windows");
+  $("reachCaution").hidden = !(shared && !key);
+  $("keyText").innerHTML = keyDraft ? "New key, not saved yet" : keyDraft === "" ? "Removed when you save"
+    : hint ? `Set: <code>${esc(hint)}</code>` : "No key";
+  $("keyNew").textContent = keyDraft ? "Generate another" : hint && keyDraft === undefined ? "Replace with a new key" : "Generate a key";
+  $("keyClear").textContent = keyDraft === undefined ? "Remove" : "Undo";
+  $("keyClear").hidden = keyDraft === undefined && !hint;
+  $("keyFresh").hidden = !keyDraft;
+  $("keyValue").textContent = keyDraft || "";
+  // On Linux a server bound to one address does not answer on 127.0.0.1.
+  const own = settingsData.mode === "native" && reach === "one" && host ? host : LOCAL;
+  const other = reach === "all" ? settingsData.primary : reach === "one" ? host : "";
+  const url = (address) => `<code>http://${esc(address)}:${esc(port)}/v1</code>`;
+  $("connectList").innerHTML = `<dt>On this computer</dt><dd>${url(own)}</dd>`
+    + (other ? `<dt>On other devices</dt><dd>${url(other)}</dd>` : "")
+    + `<dt>API key</dt><dd>${keyDraft ? `<code>${esc(keyDraft)}</code>` : key ? `The key you copied when it was generated (<code>${esc(hint)}</code>)`
+      : "None. A client that insists on one takes <code>local</code>."}</dd>`
+    + `<dt>Model</dt><dd><code>${esc(settingsData.model)}</code></dd>`;
+  $("sumApi").textContent = (reach === "local" ? "This computer only" : reach === "all" ? "All networks" : host || "One address")
+    + (key ? ", with key" : shared ? ", no key" : "");
+  $("sumModel").textContent = `${$("draftTokens").value} draft tokens` + ($("autostart").checked ? ", starts with the app" : "");
+  $("sumApp").textContent = radio("closeAction") === "keep" ? "Closing keeps the model" : "Closing stops the model";
+  $("sumLab").textContent = $("extraArgs").value.trim() || $("extraEnv").value.trim() ? "In use" : "Nothing set";
+}
+function settingsError(key, message) {
+  let hit = null;
+  for (const box of sheet.querySelectorAll("[data-key]")) {
+    const on = !!key && box.dataset.key === key;
+    if (on) { box.dataset.invalid = ""; hit = hit || box; } else delete box.dataset.invalid;
+    const line = box.querySelector(".err");
+    if (line) { line.textContent = on ? message : ""; line.hidden = !on; }
+  }
+  settingsFoot(hit || !message ? "" : message, "bad");
+  if (!hit) return;
+  showPane(hit.closest("[data-pane]").dataset.pane);  // the mistake may be in an area that is not open
+  const shown = (selector) => [...hit.querySelectorAll(selector)].find((el) => el.offsetParent !== null);
+  const field = shown("input[type=text], input[type=number]") || shown("select");
+  if (field) field.focus();
+}
+// Before saving: Cancel and Save. After a save that waits for a restart: Close, and the restart if it helps.
+function settingsButtons(saved, restart) {
+  $("settingsSave").hidden = saved;
+  $("settingsRestart").hidden = !restart;
+  $("settingsCancel").textContent = saved ? "Close" : "Cancel";
+}
+function settingsFoot(message, tone) {
+  $("settingsMessage").textContent = message;
+  $("settingsMessage").dataset.tone = tone || "";
+}
+function fillSettings(data) {
+  settingsData = data;
+  const v = data.values;
+  $("settingsFile").textContent = data.file ? `Stored in ${data.file.replace(/([\\/])/g, "$1\u200b")}` : "Mock mode: changes last until the app closes.";
+  const reach = v.api_host === LOCAL ? "local" : v.api_host === ANY ? "all" : "one";
+  setRadio("reach", reach);
+  const select = $("address");
+  select.innerHTML = "";
+  for (const row of data.addresses) select.add(new Option(row.name ? `${row.address} (${row.name})` : row.address, row.address));
+  select.add(new Option("Another address", "other"));
+  const known = data.addresses.some((row) => row.address === v.api_host);
+  select.value = reach === "one" && !known ? "other" : reach === "one" ? v.api_host : (data.addresses[0] ? data.addresses[0].address : "other");
+  $("addressOther").value = reach === "one" && !known ? v.api_host : "";
+  $("apiPort").value = v.api_port;
+  keyDraft = undefined;
+  $("stationPort").value = v.station_port;
+  $("draftTokens").value = v.draft_tokens;
+  [$("draftTokens").min, $("draftTokens").max] = data.limits.draft_tokens;
+  for (const id of ["apiPort", "stationPort"]) [$(id).min, $(id).max] = data.limits.port;
+  $("fitContext").checked = v.fit_context;
+  $("autostart").checked = v.autostart;
+  $("registerClients").checked = v.register_clients;
+  setRadio("closeAction", v.close_action);
+  $("extraArgs").value = v.extra_args;
+  $("extraEnv").value = v.extra_env;
+  settingsError("", "");
+  settingsButtons(false, false);
+  settingsFoot(data.pending.length ? "Earlier changes are waiting for the next start of the model."
+    : data.running ? "The model is running. Changes to the API and the model apply when it starts again." : "");
+  showPane("api");
+  updateSettings();
+}
+async function openSettings() {
+  try { fillSettings(await api("/api/settings")); } catch (error) {
+    $("banner").textContent = `The settings could not be loaded: ${error.message}`; $("banner").style.display = "block"; return;
+  }
+  sheet.showModal();
+}
+async function saveSettings() {
+  const whole = (id) => /^\d+$/.test($(id).value.trim()) ? Number($(id).value) : null;
+  const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens") };
+  for (const [key, value] of Object.entries(numbers)) if (value === null) { settingsError(key, "Enter a whole number."); return; }
+  const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked,
+    autostart: $("autostart").checked, register_clients: $("registerClients").checked, close_action: radio("closeAction"),
+    extra_args: $("extraArgs").value, extra_env: $("extraEnv").value };
+  let result;
+  try { result = await api("/api/settings", { values }); } catch (error) { settingsError("", `The settings could not be saved: ${error.message}`); return; }
+  if (!result.ok) { settingsError(result.field, result.error); return; }
+  settingsError("", "");
+  poll();
+  if (!result.pending.length && !result.after_restart.length) { sheet.close(); return; }
+  // Something waits for a restart: say so, and offer the restart of the model right here.
+  settingsButtons(true, result.pending.length > 0);
+  settingsFoot(result.pending.length ? "Saved. The running model keeps its settings until it starts again."
+    : "Saved. The dashboard uses its new port the next time Qwen Station starts.", "good");
+}
+function copyText(button, text) {
+  const label = button.textContent;
+  navigator.clipboard.writeText(text).then(() => { button.textContent = "Copied"; setTimeout(() => { button.textContent = label; }, 1400); });
+}
+$("openSettings").addEventListener("click", openSettings);
+$("settingsCancel").addEventListener("click", () => sheet.close());
+$("settingsSave").addEventListener("click", saveSettings);
+$("settingsRestart").addEventListener("click", () => {
+  const s = store.state;
+  if (s && s.live && s.live.running > 0 && !confirm("A request is running. Restart anyway?")) return;
+  sheet.close();
+  act("/api/restart");
+});
+const edited = () => {
+  if (!settingsData) return;
+  if ($("settingsSave").hidden) { settingsButtons(false, false); settingsFoot(""); }  // edited again after a save
+  updateSettings();
+};
+sheet.addEventListener("input", edited);
+$("address").addEventListener("pointerdown", () => { setRadio("reach", "one"); edited(); });  // choosing an address means this option
+$("keyNew").addEventListener("click", () => { keyDraft = newKey(); edited(); });
+$("keyClear").addEventListener("click", () => { keyDraft = keyDraft === undefined ? "" : undefined; edited(); });  // Remove, or Undo
+$("keyCopy").addEventListener("click", () => copyText($("keyCopy"), keyDraft));
+sheet.addEventListener("close", () => { keyDraft = undefined; $("keyValue").textContent = ""; });  // shown once: gone with the window
+sheet.querySelector(".sheet-nav").addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-tab]");
+  if (tab) showPane(tab.dataset.tab);
+});
+sheet.querySelector(".sheet-nav").addEventListener("keydown", (event) => {
+  const tabs = [...sheet.querySelectorAll("[data-tab]")], at = tabs.indexOf(document.activeElement);
+  const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+  if (at < 0 || !step) return;
+  event.preventDefault();
+  const next = tabs[(at + step + tabs.length) % tabs.length];
+  showPane(next.dataset.tab);
+  next.focus();
+});
+sheet.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target.matches("input[type=text], input[type=number]") && !$("settingsSave").hidden) { event.preventDefault(); saveSettings(); }
+});
+sheet.addEventListener("click", (event) => { if (event.target === sheet) sheet.close(); });  // a click on the backdrop
 $("logFilter").addEventListener("change", applyLogFilter);
 window.addEventListener("resize", () => { if (store.state) render(); });
 window.addEventListener("beforeunload", (event) => {

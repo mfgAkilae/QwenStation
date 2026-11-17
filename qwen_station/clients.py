@@ -17,6 +17,7 @@ from pathlib import Path
 from .config import MODEL_ID, OUTPUT_LIMIT
 
 PROVIDER_ID = "vllm"
+GENERATED_PREFIX = "qs-"  # keys the settings menu generates start like this
 PROVIDER_NAME = "vLLM RTX 5090"
 REASONING_LEVELS = ("low", "medium", "xhigh")  # the only values this Qwen chat template accepts
 PLACEHOLDERS = {"EMPTY", "dummy", "not-needed", "lm-studio", "ollama", "local"}
@@ -102,13 +103,24 @@ def _write(path: Path, original_text: str, updated: dict, trailing_newline: bool
     return backup
 
 
-def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "") -> dict:
+def key_reference(key_file: Path | None) -> str:
+    """How OpenCode's config names the key: by the file that holds it, so the config stays free of secrets."""
+    return f"{{file:{key_file.as_posix()}}}" if key_file else ""
+
+
+def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
+                   api_key: str = "", key_file: Path | None = None) -> dict:
     """Same entry shape as register-qwen-opencode.py, so both starters agree."""
     updated = copy.deepcopy(config)
     provider = _child(_child(updated, "provider"), PROVIDER_ID)
     provider["npm"] = "@ai-sdk/openai-compatible"
     provider["name"] = PROVIDER_NAME
-    _child(provider, "options")["baseURL"] = base_url
+    options = _child(provider, "options")
+    options["baseURL"] = base_url
+    if api_key and key_file:
+        options["apiKey"] = key_reference(key_file)
+    elif options.get("apiKey") == key_reference(key_file):
+        del options["apiKey"]  # the key was removed in the settings; a key the user wrote here stays
     entry = _child(_child(provider, "models"), MODEL_ID)
     entry["name"] = model_name(context, max_seqs, variant)
     entry["reasoning"] = True
@@ -126,14 +138,19 @@ def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, var
     return updated
 
 
-def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "") -> dict:
+def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
+             api_key: str = "", key_file: Path | None = None) -> dict:
     updated = copy.deepcopy(config)
     updated.setdefault("$schema", "https://pi.dev/schemas/models.schema.json")
     provider = _child(_child(updated, "providers"), PROVIDER_ID)
     provider["name"] = PROVIDER_NAME
     provider["baseUrl"] = base_url
     provider["api"] = "openai-completions"
-    provider.setdefault("apiKey", "local")  # vLLM runs without auth; Pi needs any non-empty key
+    if api_key:
+        provider["apiKey"] = api_key
+    elif str(provider.get("apiKey", "")).startswith(GENERATED_PREFIX):
+        provider["apiKey"] = "local"  # a key generated here and removed again
+    provider.setdefault("apiKey", "local")  # without a key in vLLM, Pi still needs any non-empty one
     compat = _child(provider, "compat")
     compat["supportsReasoningEffort"] = True
     compat["thinkingFormat"] = "openai"
@@ -163,13 +180,14 @@ def apply_pi(config: dict, base_url: str, context: int, max_seqs: int, variant: 
 
 
 def _register(name: str, path: Path, apply, base_url: str, context: int, max_seqs: int,
-              dry_run: bool, must_exist: bool, guard_credentials: bool, variant: str = "") -> dict:
+              dry_run: bool, must_exist: bool, guard_credentials: bool, variant: str = "",
+              api_key: str = "", key_file: Path | None = None) -> dict:
     status = {"client": name, "path": str(path), "model": f"{PROVIDER_ID}/{MODEL_ID}"}
     try:
         if must_exist and not path.parent.is_dir():
             return {**status, "status": "missing", "detail": f"{name} is not set up here"}
         original, text = _load(path)
-        updated = apply(original, base_url, context, max_seqs, variant)
+        updated = apply(original, base_url, context, max_seqs, variant, api_key, key_file)
         if updated == original:
             return {**status, "status": "ok", "detail": "registered"}
         if dry_run:
@@ -184,14 +202,33 @@ def _register(name: str, path: Path, apply, base_url: str, context: int, max_seq
         return {**status, "status": "error", "detail": str(exc)}
 
 
+def write_key_file(key_file: Path, api_key: str) -> None:
+    """Keep the file with the key in step with the setting: only the key, readable by this user only."""
+    if not api_key:
+        key_file.unlink(missing_ok=True)
+        return
+    if key_file.is_file() and key_file.read_text(encoding="ascii", errors="replace") == api_key:
+        return
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    handle = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(handle, "w", encoding="ascii", newline="") as stream:
+        stream.write(api_key)
+
+
 def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = False,
-                 opencode_file: Path | None = None, pi_file: Path | None = None, variant: str = "") -> dict:
+                 opencode_file: Path | None = None, pi_file: Path | None = None, variant: str = "",
+                 api_key: str = "", key_file: Path | None = None) -> dict:
+    if key_file and not dry_run:
+        try:
+            write_key_file(key_file, api_key)
+        except OSError:
+            key_file = None  # OpenCode then gets no key; its entry reports the difference at the next check
     return {
         "opencode": _register("OpenCode", opencode_file or opencode_path(), apply_opencode,
                               base_url, context, max_seqs, dry_run, must_exist=False, guard_credentials=True,
-                              variant=variant),
+                              variant=variant, api_key=api_key, key_file=key_file),
         # Pi's models.json legitimately holds "apiKey" entries (dummy keys, "!command"), so no credential guard.
         "pi": _register("Pi", pi_file or pi_path(), apply_pi,
                         base_url, context, max_seqs, dry_run, must_exist=True, guard_credentials=False,
-                        variant=variant),
+                        variant=variant, api_key=api_key, key_file=key_file),
     }

@@ -7,7 +7,9 @@ what the model is doing. For Windows and for Linux.
   speculative decoding
 - **Engine:** vLLM 0.32.0 with five small patches and verified kernel tuning. On Windows it runs in its own
   WSL distribution, on Linux in one folder of your user.
-- **API:** `http://127.0.0.1:8000/v1`, model `qwen38-gittensor-dflash`, no API key
+- **API:** `http://127.0.0.1:8000/v1`, model `qwen38-gittensor-dflash`. For this computer only and without a
+  key by default; the settings open it for other devices, on all network interfaces or on one address, and
+  generate an API key.
 - **Speed on the test machine:** it depends on what the model writes. Short prompts: about 160 tok/s for
   prose, 330 for code, 450 for step-by-step reasoning. Behind 137K tokens of context: 190, 240 and 320.
   Up to 262,144 tokens of context. [Details and how to measure it yourself](#speed).
@@ -112,7 +114,8 @@ In a test on Ubuntu 24.04 the setup took 6 minutes on a 35 MB/s connection and u
   `~/.pi/agent/models.json`, provider `vllm`). Before its first change it writes a backup next to the file.
 - **T3 Code:** choose the provider OpenCode or Pi and the model `vllm/qwen38-gittensor-dflash`. If Pi does
   not list it, add it as a custom model with exactly this slug.
-- **Other clients:** base URL `http://127.0.0.1:8000/v1`, any API key (for example `local`).
+- **Other clients:** base URL `http://127.0.0.1:8000/v1`, any API key (for example `local`). If you set an
+  API key in the settings, clients must send that one.
 - **Reasoning effort:** `low`, `medium` or `xhigh`. This checkpoint knows no other levels.
 - vLLM rejects `min_p` and `logit_bias` with HTTP 400 while speculative decoding is active.
 
@@ -129,7 +132,8 @@ app a second time only shows the window again.
 - The server log, with a filter for warnings and errors
 
 All values come from the `/metrics` endpoint of the vLLM server. Nothing sits in the request path: the API
-is the unmodified vLLM endpoint.
+is the unmodified vLLM endpoint. One exception: on Windows, requests from other devices pass through a relay in
+the app, which hands the bytes on unchanged (see [Settings](#settings)).
 
 ### Free VRAM decides the context size
 
@@ -147,15 +151,51 @@ before starting to get the full context.
 
 ## Settings
 
-Optional file `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Linux `~/.config/qwen-station/qwen-station.json`
-(the setup creates it). All keys are optional:
+The **Settings** button in the window opens them:
+
+![The settings](docs/settings.png)
+
+- **Who can reach the API:** this computer only (`127.0.0.1`, the default), every device that can reach this
+  computer (`0.0.0.0`, all network interfaces), or one address of this computer, for example the one of your LAN
+  or of a VPN. The list shows the addresses the computer has.
+- **API key:** "Generate a key" creates one and shows it once: copy it then. After you save and close the
+  settings, the app does not show it again; you can only replace or remove it. Clients send the key with every
+  request (`Authorization: Bearer <key>`, the API key field of an OpenAI-compatible client). Without a key,
+  anyone who can reach the address can use the model, so set one before you share the API.
+- The API port, draft tokens per round, the automatic context reduction, the start of the model with the app,
+  what happens when the window closes, the registration in OpenCode and Pi, the port of the dashboard, and
+  extra arguments and environment for experiments.
+
+The areas on the left show the current state at a glance. Changes to the API and the model apply when the model
+starts; while it runs, the window offers to restart it. The port of the dashboard applies the next time Qwen
+Station starts.
+
+What the key does and does not protect: vLLM checks it for everything below `/v1` (chat, completions, the model
+list). The metrics and the health check stay open, which is how the dashboard reads them. The key travels in
+clear text, as the API speaks plain HTTP: use it on networks you trust or behind a VPN, not across the internet.
+The app has to keep the key to start the server with it, so it stays in the settings file, readable for your
+user account. The server gets it through its environment, never on a command line. OpenCode's config gets a
+reference to a file that holds the key (`api-key` next to the settings file), Pi's config the key itself.
+
+- **Windows:** the model runs inside WSL, which Windows reaches at `127.0.0.1` only. For other devices the app
+  itself listens on the chosen address and passes connections on. Windows asks for administrator rights once,
+  to add a firewall rule for that address and port: for all interfaces the rule covers private and domain
+  networks, not public ones; for a single address it covers that address. Going back to "this computer only"
+  removes the rule again (one more prompt). Windows cancels an unanswered prompt after two minutes; the model
+  then starts without the rule, and the next start asks again.
+- **Linux:** the server binds the chosen address itself. The firewall is yours to open. With a single address
+  the API no longer answers on `127.0.0.1`; the app and the registered clients then use that address.
+
+The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Linux in
+`~/.config/qwen-station/qwen-station.json`. You can edit the file as well. All keys are optional:
 
 ```json
 {
   "preset": "262k",
   "close_action": "stop",
   "autostart": true,
-  "lan": false,
+  "api_host": "127.0.0.1",
+  "api_key": "",
   "fit_context": true,
   "api_port": 8000,
   "station_port": 8010,
@@ -168,9 +208,10 @@ Optional file `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Linux `~/.confi
   experimental) or `unsloth-82k` (Unsloth's NVFP4 build with the same drafter; needs
   `provision.sh model-unsloth` first: inside the distribution on Windows, in the engine folder on Linux).
 - `close_action`: `stop` ends the model when the window closes, `keep` leaves it running until **Quit**.
-- `lan`: `true` binds the API to `0.0.0.0`. On Windows it also sets up the port forwarding and a firewall rule
-  for the private network (asks for administrator rights once); on Linux the firewall is yours to open. The API
-  has no authentication, so the default is local only.
+- `api_host`: `127.0.0.1` (default), `0.0.0.0` or one IPv4 address of this computer, as described above.
+  The older switch `lan: true` still works and means `0.0.0.0`.
+- `api_key`: empty (default, no key) or 8 to 128 characters: letters, digits and `. _ ~ + / = -`. In the file
+  you can also set a key of your own.
 - `fit_context`: `false` switches the automatic context reduction off.
 - `draft_tokens`: how many tokens the drafter proposes per round, 7 by default, up to 15. More makes reasoning
   17 to 30 percent faster and costs about 5,400 tokens of context each, see [Speed](#speed). Single-slot presets only.
@@ -179,7 +220,8 @@ Optional file `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Linux `~/.confi
 
 The same values work as command line options: `Qwen-Station.exe --preset 237k --keep --no-autostart`, on Linux
 `qwen-station --preset 237k --no-autostart`. `--check` prints the state of the installation as JSON and exits.
-`--setup` starts a needed setup without the click, `--location` names its folder.
+`--setup` starts a needed setup without the click, `--location` names its folder. `--api-host 0.0.0.0` sets
+the address of the API for one run.
 
 ## Speed
 
@@ -224,6 +266,8 @@ python tools/bench.py --markdown                 # about five minutes against ht
 python tools/bench.py --contexts 0 --repeats 3   # the short prompts only
 ```
 
+With an API key in the settings, pass it with `--api-key` or in the variable `QWEN_API_KEY`.
+
 The prompts are fixed and in the script. A row is marked when other requests ran on the server at the same time.
 
 ## Remove
@@ -250,6 +294,9 @@ file is an AppImage: the same Python package and a standalone Python 3.12, behin
 | `qwen_station/app.py` | HTTP API for the dashboard, polling, window handling, entry point |
 | `qwen_station/setup.py` | First-run setup: requirements, progress of the provisioning; WSL and the distribution on Windows, one folder on Linux |
 | `qwen_station/installer.py` | Installs and removes the app itself (per user, no administrator rights) |
+| `qwen_station/settings.py` | The settings of the menu: valid values, the addresses of this computer, when a change applies |
+| `qwen_station/relay.py` | Windows: passes connections from other devices on to the server inside WSL |
+| `qwen_station/setup-qwen-lan.ps1` | Windows: the firewall rule for a shared API |
 | `qwen_station/supervisor.py` | Preflight, start of the server (inside WSL or directly), startup phases from the log, stop |
 | `qwen_station/metrics.py` | Parses `/metrics`; speed and request rows from counter differences |
 | `qwen_station/gpu.py` | `nvidia-smi` readings, GPU memory per Windows process |
@@ -271,7 +318,7 @@ served page, so other websites cannot control the app.
 ```powershell
 python run-station.py --mock            # fake server instead of the model: the dashboard without a GPU
 python run-station.py --check           # state of the installation as JSON
-python -m unittest discover -s tests    # 73 tests; they start the mock server as a real subprocess
+python -m unittest discover -s tests    # 113 tests; they start the mock server as a real subprocess
 .\build-exe.ps1 -Release                # dist\Qwen-Station-Setup-<version>.exe with its SHA256 file
 python3 build-linux.py                  # on Linux: dist/Qwen-Station-<version>-x86_64.AppImage with its SHA256 file
 ```
@@ -302,6 +349,13 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
 - **Windows**, with the release exe: uninstall, fresh setup into a new distribution, first start, benchmark,
   stop (1.0.0); updates to 1.1.0 and 1.2.0 without a click; 1.2.0 with `draft_tokens` 15, including the two
   LocalMaxxing runs.
+- **The settings of 1.4.0**, on Windows with the release exe: the API on all interfaces through the settings
+  and a restart of the model, the administrator prompt (declined once, by its timeout, and confirmed once), the
+  firewall rule, the removal of a port forwarding of an older setup, requests from this PC, over its LAN and VPN
+  addresses and from a second machine in the LAN; an API key (401 without it, 200 with it, also from the second
+  machine), its way into the configs of OpenCode and Pi, and its removal. On Linux, with the app from the
+  checkout against an installed engine: the API on one address with a key, and on all interfaces without one.
+  The settings window itself was driven in a headless browser against the mock server.
 - **Linux**, with the AppImage of 1.3.0 as a user without root rights, in a fresh Ubuntu 24.04 without a
   compiler: first start (the app installs itself and continues as the installed copy), setup including the
   stop at the missing compiler and the restart after installing it (364 seconds), first start of the model
@@ -311,8 +365,13 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   WSL 2, because the test machine has no second operating system: kernel and file system are Linux, the GPU
   driver is the one of Windows.
 
+Not tested: the AppImage of 1.4.0 was built and started but not installed again from scratch; the settings
+window in a real browser with a person clicking; a single address as the final setting on Windows (the firewall
+rule for it); going back to "this computer only" (the removal of the rule); OpenCode and Pi actually talking to
+the model with a key set.
+
 Not tested on a real machine: Linux on bare metal with the native NVIDIA driver; the double-click in a file
 manager and the window on a Linux desktop (only the terminal mode ran); distributions other than Ubuntu (the
 bundled Python is built for glibc 2.17 and newer, the package manager commands for Fedora, Arch and openSUSE are
 untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a faked WSL only);
-Windows 10; the `lan` option; the preset `parallel-96k` on the GPU.
+Windows 10; the preset `parallel-96k` on the GPU.

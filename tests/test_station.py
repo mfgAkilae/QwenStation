@@ -186,7 +186,7 @@ class LauncherTests(unittest.TestCase):
         lan = WslLauncher(Config(root=r"D:\qwen-engine", lan=True, gpu_memory_utilization=0.9,
                                  extra_args="--max-model-len 188416", vllm_prefix="/opt/vllm-0.32.0"))
         lan_command = lan.command({"context": 98304, "kv_bytes": 10350000000, "max_seqs": 2})
-        self.assertIn("VLLM_HOST=0.0.0.0", lan_command)
+        self.assertIn("VLLM_HOST=127.0.0.1", lan_command)  # in WSL always; other devices come in through the relay
         self.assertIn("GPU_UTIL=0.9", lan_command)
         self.assertIn("EXTRA_ARGS=--disable-access-log-for-endpoints /metrics,/health --max-model-len 188416", lan_command)
         self.assertIn("VLLM_PREFIX=/opt/vllm-0.32.0", lan_command)

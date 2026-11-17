@@ -49,7 +49,7 @@ STEPS = (
     ("drafter", "Download the drafter", 7),
     ("verify", "Final check", 2),
 )
-# Native Linux: no app copy (the installer script did that), no WSL, no distribution.
+# Native Linux: no app copy (installer.linux_handover did that before the app started), no WSL, no distribution.
 NATIVE_STEPS = tuple(step for step in STEPS if step[0] not in ("app", "wsl", "distro"))
 NATIVE_MIN_FREE_GB = 40  # measured 28 GB after the setup, plus headroom
 WSL_DECLINED = ("WSL cannot be installed without administrator rights. Run the setup again and confirm the "

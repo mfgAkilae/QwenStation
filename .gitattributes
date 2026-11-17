@@ -3,3 +3,4 @@
 *.env text eol=lf
 *.py text eol=lf
 *.png binary
+packaging/AppRun text eol=lf

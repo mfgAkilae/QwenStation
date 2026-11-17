@@ -286,8 +286,27 @@ class Station:
         return 0
 
 
-def has_display() -> bool:
-    return os.name == "nt" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+OTHER_BROWSERS = ("firefox", "firefox-esr", "librewolf", "epiphany", "falkon", "konqueror", "vivaldi", "opera")
+
+
+def can_show_window() -> bool:
+    """Is there a desktop and a browser for the dashboard? A display alone does not say so: WSLg and
+    `ssh -X` set one on machines without any browser, and the app then has to behave as on a server."""
+    if os.name == "nt":
+        return True
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    if any(path.is_file() for path in _app_browsers()) or any(shutil.which(name) for name in OTHER_BROWSERS):
+        return True
+    tool = shutil.which("xdg-mime")  # some other browser registered itself as the handler for web pages
+    if not tool:
+        return False
+    try:
+        handler = subprocess.run([tool, "query", "default", "x-scheme-handler/http"], capture_output=True,
+                                 text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(handler.strip())
 
 
 def _app_browsers() -> list[Path]:
@@ -303,7 +322,7 @@ def _app_browsers() -> list[Path]:
 
 def launch_window(url: str) -> tuple[subprocess.Popen | None, bool | None]:
     """Open the dashboard as its own app window (Edge or Chrome), else in the default browser."""
-    if not has_display():
+    if not can_show_window():
         return None, False
     for executable in _app_browsers():
         if not executable.is_file():
@@ -542,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             _message_box(uninstall_message(config), icon=0x40)
             installer.uninstall_app()
             return 0
-        if config.open_window and not has_display():
+        if config.open_window and not can_show_window():
             config.open_window = False  # no desktop: the dashboard is still there for a browser or an SSH tunnel
         station = Station(config)
         station.auto_setup = bool(args.setup)
@@ -563,6 +582,14 @@ def main(argv: list[str] | None = None) -> int:
             if config.open_window:
                 launch_window(f"http://127.0.0.1:{config.station_port}/")  # already running: just show it
             return 0
+        if installer.image_dir() is not None and not config.mock:
+            arguments = list(sys.argv[1:] if argv is None else argv)
+            if not arguments and not can_show_window():
+                # Without a desktop there is no window to click in: the setup starts right away.
+                arguments, station.auto_setup = ["--setup"], True
+            problem = installer.linux_handover(arguments)  # returns only if the app could not be installed
+            LOG.warning("app not installed: %s", problem)
+            print(f"The app could not be installed ({problem}). It runs from the image this time.", file=sys.stderr)
         def stop(signum, frame) -> None:  # kill, a closed terminal: stop the model in order
             station.quit_event.set()
 

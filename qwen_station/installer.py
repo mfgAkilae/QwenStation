@@ -2,7 +2,8 @@
 
 No admin rights are needed; everything lives in the user's profile.
 
-On Linux the installer script (packaging/linux-setup.sh) puts the app in place; this module only removes it.
+On Linux the release is an AppImage. Started from there, the app copies the content of the image into the user's
+data folder, adds a command and a menu entry, and continues as that installed copy (linux_handover).
 """
 
 from __future__ import annotations
@@ -142,12 +143,88 @@ def install_app() -> Path:
 
 
 def linux_paths() -> dict[str, Path]:
-    """Where packaging/linux-setup.sh puts the app. Keep both in step."""
+    """Where the app lives on Linux: its files, the command, the menu entry and the icon."""
     data = Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share"))
     return {"app": data / "qwen-station" / "app",
             "launcher": Path.home() / ".local" / "bin" / "qwen-station",
             "desktop": data / "applications" / "qwen-station.desktop",
             "icon": data / "icons" / "hicolor" / "256x256" / "apps" / "qwen-station.png"}
+
+
+START_FILE = "AppRun"      # start file of the image and of the installed copy
+BUILD_FILE = "VERSION"     # version and build of an image; decides whether the installed copy is replaced
+IMAGE_VARIABLES = ("APPDIR", "APPIMAGE", "ARGV0", "OWD")  # set by the AppImage runtime
+
+
+def desktop_entry(command: str) -> str:
+    """The menu entry. The command is quoted the way the desktop entry specification asks for."""
+    quoted = '"' + "".join("\\" + char if char in '"`$\\' else char for char in command) + '"'
+    return ("[Desktop Entry]\nType=Application\nName=Qwen Station\nComment=Start and monitor Qwen3.8 on vLLM\n"
+            f"Exec={quoted}\nIcon=qwen-station\nTerminal=false\nCategories=Development;Science;\n")
+
+
+def image_dir() -> Path | None:
+    """The mounted or unpacked AppImage this process runs from. None for the installed copy or a checkout."""
+    mounted = os.environ.get("APPDIR")
+    if IS_WINDOWS or not mounted:
+        return None
+    root = Path(mounted).resolve()
+    return root if root in Path(__file__).resolve().parents and (root / START_FILE).is_file() else None
+
+
+def _build_of(folder: Path) -> str | None:
+    try:
+        return (folder / BUILD_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def install_linux_app(source: Path) -> Path:
+    """Copy the content of the image to the app folder, then write the command, the menu entry and the icon.
+    Returns the start file of the installed copy."""
+    paths = linux_paths()
+    app = paths["app"]
+    staging = app.with_name(app.name + ".new")
+    shutil.rmtree(staging, ignore_errors=True)
+    app.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, staging, symlinks=True)
+    shutil.rmtree(app, ignore_errors=True)
+    staging.rename(app)
+    start = app / START_FILE
+    for path in (paths["launcher"], paths["desktop"], paths["icon"]):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    quoted = "'" + str(start).replace("'", "'\\''") + "'"
+    paths["launcher"].write_text(f'#!/bin/sh\nexec {quoted} "$@"\n', encoding="utf-8", newline="\n")
+    paths["launcher"].chmod(0o755)
+    paths["desktop"].write_text(desktop_entry(str(paths["launcher"])), encoding="utf-8", newline="\n")
+    shutil.copyfile(app / "qwen-station.png", paths["icon"])
+    return start
+
+
+def linux_handover(arguments: list[str]) -> str | None:
+    """Started from the AppImage: install its content if it is new, then continue as the installed copy.
+
+    Does not return when that works. Returns None when this process is not an image, and the reason when the
+    installation failed; the caller then keeps running from the image."""
+    source = image_dir()
+    if source is None:
+        return None
+    start = linux_paths()["app"] / START_FILE
+    try:
+        if _build_of(start.parent) != _build_of(source) or not start.is_file():
+            install_linux_app(source)
+            print(f"Qwen Station {__version__} is installed. Start it from the menu or with: "
+                  f"{linux_paths()['launcher']}", flush=True)
+        environment = {name: value for name, value in os.environ.items() if name not in IMAGE_VARIABLES}
+        if source.name.startswith("appimage_extracted_") and os.access(start, os.X_OK):
+            # Started with --appimage-extract-and-run: the runtime unpacked the image into the temp folder and
+            # never removes it (its cleanup calls nftw with 0 file descriptors, which does nothing in musl).
+            # Nothing of it is needed from here on; this process keeps the files it has open.
+            shutil.rmtree(source, ignore_errors=True)
+        os.execve(str(start), [str(start), *arguments], environment)
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def uninstall_app() -> None:

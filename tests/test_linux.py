@@ -1,11 +1,9 @@
 """The native Linux mode and its release file. These tests run on Windows and Linux alike."""
 
 import importlib.util
-import io
 import json
 import os
 import sys
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +11,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import qwen_station  # noqa: E402
+from qwen_station import app as app_module  # noqa: E402
 from qwen_station import config as config_module  # noqa: E402
 from qwen_station import installer, setup  # noqa: E402
 from qwen_station.config import PRESETS, Config, load_config  # noqa: E402
@@ -51,6 +51,7 @@ class TempHome(unittest.TestCase):
             mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.home / "local"), "XDG_CONFIG_HOME": str(self.home / "config"),
                                          "XDG_DATA_HOME": str(self.home / "data")}),
             mock.patch.object(config_module, "IS_WINDOWS", False),
+            mock.patch.object(Path, "home", return_value=self.home),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -155,17 +156,116 @@ class NativeModeTests(TempHome):
         self.assertIn("/data/qwen.station/logs/status.txt", launcher.stop_script())
         self.assertTrue(launcher.distro_check()[0])
 
-    def test_uninstall_removes_what_the_installer_script_created(self):
+    def test_uninstall_removes_what_the_installation_created(self):
         paths = installer.linux_paths()
         for name, path in paths.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             if name == "app":
-                (path / "qwen_station").mkdir(parents=True)
+                (path / "station" / "qwen_station").mkdir(parents=True)
             else:
                 path.write_text("x", encoding="utf-8")
         with mock.patch.object(installer, "IS_WINDOWS", False):
             installer.uninstall_app()
         self.assertFalse(any(path.exists() for path in paths.values()))
+
+
+class ImageInstallTests(TempHome):
+    """The AppImage copies its content into the user's data folder and continues from there."""
+
+    def setUp(self):
+        super().setUp()
+        self.image = self.home / "mount"
+        (self.image / "station" / "qwen_station").mkdir(parents=True)
+        for name, text in ((installer.START_FILE, "#!/bin/sh\n"), (installer.BUILD_FILE, "1.3.0 abc\n"),
+                           ("qwen-station.png", "png"), ("station/qwen_station/installer.py", "")):
+            (self.image / name).write_text(text, encoding="utf-8")
+        self.module_file = str(self.image / "station" / "qwen_station" / "installer.py")
+        for patcher in (mock.patch.object(installer, "IS_WINDOWS", False),
+                        mock.patch.dict(os.environ, {"APPDIR": str(self.image), "APPIMAGE": "/x/Qwen.AppImage"})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def handover(self, *arguments):
+        with mock.patch.object(installer, "__file__", self.module_file), \
+                mock.patch.object(installer.os, "execve") as execve, mock.patch("builtins.print"):
+            problem = installer.linux_handover(list(arguments))
+        return problem, execve
+
+    def test_only_a_process_inside_the_image_counts_as_the_image(self):
+        self.assertIsNone(installer.image_dir())  # this test runs from the checkout
+        with mock.patch.object(installer, "__file__", self.module_file):
+            self.assertEqual(installer.image_dir(), self.image.resolve())
+            with mock.patch.dict(os.environ, {"APPDIR": ""}):
+                self.assertIsNone(installer.image_dir())
+
+    def test_the_first_start_installs_the_app_and_continues_as_the_installed_copy(self):
+        problem, execve = self.handover("--setup")
+        paths = installer.linux_paths()
+        start = paths["app"] / installer.START_FILE
+        self.assertIsNone(problem)
+        self.assertTrue((paths["app"] / "station" / "qwen_station" / "installer.py").is_file())
+        self.assertIn(f"exec '{start}' \"$@\"", paths["launcher"].read_text(encoding="utf-8"))
+        entry = paths["desktop"].read_text(encoding="utf-8")
+        self.assertIn("Exec=\"" + str(paths["launcher"]).replace("\\", "\\\\") + "\"\n", entry)
+        self.assertEqual(paths["icon"].read_text(encoding="utf-8"), "png")
+        program, argv, environment = execve.call_args.args
+        self.assertEqual((program, argv), (str(start), [str(start), "--setup"]))
+        self.assertFalse(set(installer.IMAGE_VARIABLES) & set(environment))
+
+    def test_the_same_build_is_not_copied_again_and_another_build_replaces_it(self):
+        self.handover()
+        marker = installer.linux_paths()["app"] / "kept"
+        marker.write_text("x", encoding="utf-8")
+        self.handover()
+        self.assertTrue(marker.is_file())
+        (self.image / installer.BUILD_FILE).write_text("1.3.1 def\n", encoding="utf-8")
+        _, execve = self.handover()
+        self.assertFalse(marker.exists())
+        self.assertEqual(execve.call_count, 1)
+
+    def test_a_failed_installation_reports_its_reason_and_starts_nothing(self):
+        with mock.patch.object(installer.shutil, "copytree", side_effect=OSError("disk full")):
+            problem, execve = self.handover()
+        self.assertEqual(problem, "disk full")
+        execve.assert_not_called()
+
+    def test_an_unpacked_image_in_the_temp_folder_is_removed_and_a_mounted_one_is_left_alone(self):
+        self.handover()
+        self.assertTrue(self.image.is_dir())
+        unpacked = self.home / "appimage_extracted_0123"
+        self.image.rename(unpacked)
+        self.image = unpacked
+        self.module_file = str(unpacked / "station" / "qwen_station" / "installer.py")
+        start = installer.linux_paths()["app"] / installer.START_FILE
+        with mock.patch.dict(os.environ, {"APPDIR": str(unpacked)}),                 mock.patch.object(installer.os, "access", side_effect=lambda path, mode: Path(path) == start):
+            problem, execve = self.handover()
+        self.assertIsNone(problem)
+        self.assertFalse(unpacked.exists())
+        self.assertEqual(execve.call_count, 1)
+
+    def test_the_menu_entry_quotes_its_command(self):
+        entry = installer.desktop_entry('/home/a b/"x"$y/qwen-station')
+        self.assertIn('Exec="/home/a b/\\"x\\"\\$y/qwen-station"\n', entry)
+        self.assertIn("Icon=qwen-station\n", entry)
+
+
+@unittest.skipIf(os.name == "nt", "the window always opens on Windows")
+class WindowTests(unittest.TestCase):
+    """A display alone is not enough for a window: WSLg and ssh -X set one without any browser."""
+
+    def can_show(self, display, programs=()):
+        environment = {"DISPLAY": display, "WAYLAND_DISPLAY": ""}
+        with mock.patch.dict(os.environ, environment), mock.patch.object(app_module, "_app_browsers", return_value=[]),                 mock.patch.object(app_module.shutil, "which", side_effect=lambda name: name if name in programs else None):
+            return app_module.can_show_window()
+
+    def test_no_display_means_no_window(self):
+        self.assertFalse(self.can_show("", programs=("firefox",)))
+
+    def test_a_display_without_any_browser_means_no_window(self):
+        self.assertFalse(self.can_show(":0"))
+
+    def test_a_display_with_a_browser_gets_the_window(self):
+        self.assertTrue(self.can_show(":0", programs=("firefox",)))
 
 
 class ReleaseFileTests(unittest.TestCase):
@@ -175,28 +275,31 @@ class ReleaseFileTests(unittest.TestCase):
         cls.builder = importlib.util.module_from_spec(spec)
         sys.path.insert(0, str(PROJECT))
         spec.loader.exec_module(cls.builder)
+        cls.files = {name: (data, mode) for name, data, mode in cls.builder.app_files()}
 
-    def test_the_payload_holds_the_app_with_unix_line_endings(self):
-        with tarfile.open(fileobj=io.BytesIO(self.builder.payload()), mode="r:gz") as archive:
-            members = {member.name: member for member in archive.getmembers()}
-            serve = archive.extractfile("qwen_station/engine/serve.sh").read()
-            icon = archive.extractfile("qwen-station.png").read()
-        for name in ("run-station.py", "qwen_station/app.py", "qwen_station/dashboard.html",
-                     "qwen_station/engine/provision.sh", "qwen_station/engine/engine.env",
-                     "qwen_station/engine/patches/patch-vllm-autotune-seed.py"):
-            self.assertIn(name, members)
-        self.assertFalse([name for name in members if "__pycache__" in name or name.endswith((".pyc", ".ps1"))])
+    def test_the_image_holds_the_app_with_unix_line_endings(self):
+        for name in ("station/run-station.py", "station/qwen_station/app.py", "station/qwen_station/dashboard.html",
+                     "station/qwen_station/engine/provision.sh", "station/qwen_station/engine/engine.env",
+                     "station/qwen_station/engine/patches/patch-vllm-autotune-seed.py"):
+            self.assertIn(name, self.files)
+        self.assertFalse([name for name in self.files if "__pycache__" in name or name.endswith((".pyc", ".ps1"))])
+        serve, mode = self.files["station/qwen_station/engine/serve.sh"]
         self.assertNotIn(b"\r", serve)
-        self.assertEqual(members["qwen_station/engine/serve.sh"].mode, 0o755)
-        self.assertTrue(icon.startswith(b"\x89PNG"))
+        self.assertEqual(mode, 0o755)
+        self.assertTrue(self.files["qwen-station.png"][0].startswith(b"\x89PNG"))
 
-    def test_the_installer_script_and_the_uninstall_agree_on_the_paths(self):
-        stub = (PROJECT / "packaging" / "linux-setup.sh").read_text(encoding="utf-8")
-        self.assertTrue(stub.endswith("\n__PAYLOAD__\n"))
-        for fragment in ('APP="$DATA/qwen-station/app"', 'BIN="$HOME/.local/bin"',
-                         'DESKTOP="$DATA/applications/qwen-station.desktop"',
-                         'ICON="$DATA/icons/hicolor/256x256/apps/qwen-station.png"'):
-            self.assertIn(fragment, stub)
+    def test_the_top_of_the_image_has_what_the_format_and_the_installation_need(self):
+        start, mode = self.files[installer.START_FILE]
+        self.assertTrue(start.startswith(b"#!/bin/sh\n"))
+        self.assertNotIn(b"\r", start)
+        self.assertEqual(mode, 0o755)
+        self.assertIn(b"station/run-station.py", start)
+        version, build = self.files[installer.BUILD_FILE][0].decode().split()
+        self.assertEqual(version, qwen_station.__version__)
+        self.assertEqual(len(build), 12)
+        self.assertIn(b"Exec=\"AppRun\"\n", self.files["qwen-station.desktop"][0])
+
+    def test_the_paths_of_the_installation_follow_the_xdg_folders(self):
         with mock.patch.dict(os.environ, {"XDG_DATA_HOME": "/x/data"}):
             paths = {name: path.as_posix() for name, path in installer.linux_paths().items()}
         self.assertEqual(paths["app"], "/x/data/qwen-station/app")

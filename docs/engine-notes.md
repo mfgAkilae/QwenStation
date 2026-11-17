@@ -133,5 +133,9 @@ Native Linux mode (release file 1.1.0, Ubuntu 24.04 inside WSL 2, user without r
 limit 196,608 tokens: 272 to 346 tok/s short, 261 to 292 tok/s at 33K, 203 to 211 tok/s at 129K. Setup 381 seconds,
 28 GB on disk, first start 199 seconds, second start 81 seconds.
 
+The AppImage of 1.3.0 in a fresh Ubuntu 24.04 inside WSL 2, 2026-11-17, context limit 262,144 tokens: setup 364
+seconds, first start 154 seconds, a later start 44 seconds. Short prompts: 162 tok/s for prose, 320 for code, 423
+for reasoning, at 65 rounds per second.
+
 Setup time on a 35 MB/s connection: 446 seconds from the click to a complete installation (model download 17.9 GB
 included), 31 GB on disk afterwards. First start: 166 seconds. Later starts: 47 to 80 seconds.

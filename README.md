@@ -25,8 +25,8 @@ what the model is doing. For Windows and for Linux.
 - Internet for the setup: about 30 GB of downloads
 - **Windows:** Windows 11, or Windows 10 from version 21H2. WSL 2 from version 2.4.4; the setup installs or
   updates WSL if needed (see below).
-- **Linux:** x86_64, Python 3.10 or newer, bash, tar. A C++ compiler, make and curl; if they are missing, the
-  setup names the one command that installs them.
+- **Linux:** x86_64, any distribution with glibc 2.17 or newer, bash, tar. No Python needed: the app brings
+  its own. A C++ compiler, make and curl; if they are missing, the setup names the one command that installs them.
 
 ## Install on Windows
 
@@ -59,16 +59,26 @@ the changed parts of the engine and starts the model.
 
 ## Install on Linux
 
-1. Download `Qwen-Station-Setup-<version>-linux.run` from the
+1. Download `Qwen-Station-<version>-x86_64.AppImage` from the
    [latest release](https://github.com/mfgAkilae/QwenStation/releases/latest).
-2. Run it: `sh Qwen-Station-Setup-<version>-linux.run`. There is nothing to unpack and nothing needs root rights.
+2. Make it executable and start it. In the file manager: Properties, allow running it as a program, then
+   double-click. In a terminal:
 
-On a desktop the window opens; click **Set up**. Without a desktop (a server, an SSH session) the setup starts
-right away and prints its progress in the terminal.
+   ```sh
+   chmod +x Qwen-Station-<version>-x86_64.AppImage
+   ./Qwen-Station-<version>-x86_64.AppImage
+   ```
+
+The AppImage is the whole app in one executable file, with a Python of its own. There is nothing to unpack and
+nothing needs root rights. At its first start it installs itself, so you can delete the downloaded file
+afterwards; the app then starts from the menu or with `qwen-station`.
+
+On a desktop with a browser the window opens; click **Set up**. Without one (a server, an SSH session) the
+setup starts right away and prints its progress in the terminal.
 
 | Step | What happens |
 |---|---|
-| App | The file installs the app into `~/.local/share/qwen-station/app`, the command `~/.local/bin/qwen-station` and a menu entry. |
+| App | The AppImage copies its content to `~/.local/share/qwen-station/app` (46 MB) and adds the command `~/.local/bin/qwen-station` and a menu entry. |
 | Engine | uv, a Python 3.12 of its own, vLLM with PyTorch, the CUDA compiler, the patches and prebuilt GPU kernels, all below one folder (default `~/.local/share/qwen-station`). |
 | Model | Downloads the model (17.9 GB) and the drafter (2.3 GB) from Hugging Face, pinned to fixed revisions. |
 
@@ -79,16 +89,22 @@ If neither works it stops and shows the command to run once, for example
 Options go after the file name and on to the app:
 
 ```sh
-sh Qwen-Station-Setup-<version>-linux.run --setup --location /data/qwen-station   # another folder, no click
-sh Qwen-Station-Setup-<version>-linux.run --no-start                              # install the app only
-qwen-station --no-window                                                           # later: start without a window
+./Qwen-Station-<version>-x86_64.AppImage --setup --location /data/qwen-station   # another folder, no click
+qwen-station --no-window                                                         # later: start without a window
 ```
+
+An AppImage mounts itself with FUSE (`fusermount`), which desktop distributions bring along. Where it is missing
+(containers, minimal servers) the start says so; start the file once with `--appimage-extract-and-run` as its
+first option instead. The installed app does not need FUSE.
+
+A newer version updates an existing installation the same way: start the new AppImage, it replaces the app and
+the changed parts of the engine. That also works for an installation made with the `.run` file of 1.1.0 or 1.2.0.
 
 Without a desktop the dashboard is still there at `http://127.0.0.1:8010/`; reach it from another machine with
 `ssh -L 8010:127.0.0.1:8010 <host>`. Ctrl+C, `kill` or a closed terminal stop the model in order. To keep it
 running after you log out, start it in `tmux` or with `nohup qwen-station --no-window &`.
 
-In a test on Ubuntu 24.04 the setup took 6.5 minutes on a 35 MB/s connection and used 28 GB.
+In a test on Ubuntu 24.04 the setup took 6 minutes on a 35 MB/s connection and used 28 GB.
 
 ## Use
 
@@ -227,7 +243,7 @@ Linux:
 ## How it is built
 
 Plain Python (3.10 or newer), standard library only. The Windows exe is a PyInstaller one-file build. The Linux
-file is a shell script followed by a tar.gz of the same Python package.
+file is an AppImage: the same Python package and a standalone Python 3.12, behind the static AppImage runtime.
 
 | Path | Purpose |
 |---|---|
@@ -255,14 +271,16 @@ served page, so other websites cannot control the app.
 ```powershell
 python run-station.py --mock            # fake server instead of the model: the dashboard without a GPU
 python run-station.py --check           # state of the installation as JSON
-python -m unittest discover -s tests    # 62 tests; they start the mock server as a real subprocess
+python -m unittest discover -s tests    # 73 tests; they start the mock server as a real subprocess
 .\build-exe.ps1 -Release                # dist\Qwen-Station-Setup-<version>.exe with its SHA256 file
-python build-linux.py                   # dist/Qwen-Station-Setup-<version>-linux.run with its SHA256 file
+python3 build-linux.py                  # on Linux: dist/Qwen-Station-<version>-x86_64.AppImage with its SHA256 file
 ```
 
-`build-exe.ps1` creates its own venv in `.build\` and installs PyInstaller there. `build-linux.py` needs nothing
-but Python and runs on Windows and Linux alike. The tests pass on both; the ones about WSL and Windows paths
-are skipped on Linux.
+`build-exe.ps1` creates its own venv in `.build\` and installs PyInstaller there. `build-linux.py` runs on Linux
+(WSL works) and needs `mksquashfs` from the package squashfs-tools. It downloads two files, pinned by SHA256: the
+Python from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) and the runtime from
+[AppImage/type2-runtime](https://github.com/AppImage/type2-runtime). The tests pass on Windows and Linux; the
+ones about WSL and Windows paths are skipped on Linux.
 
 ## License
 
@@ -273,6 +291,10 @@ each keeps its own license: vLLM, the model (`gittensor-model-hub/Qwen3.8-27B-NV
 (`TechPrototyper/Qwen3.8-27B-DFlash2-fp8-vllm`) are Apache 2.0. The scripts in `qwen_station/engine/patches/`
 change the installed vLLM on your machine.
 
+The Linux AppImage contains two parts from others, unchanged: CPython 3.12 as built by python-build-standalone
+(Python Software Foundation License, with the licenses of the libraries built into it) and the AppImage runtime
+(MIT License).
+
 ## Tested, and not tested
 
 Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
@@ -280,14 +302,17 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
 - **Windows**, with the release exe: uninstall, fresh setup into a new distribution, first start, benchmark,
   stop (1.0.0); updates to 1.1.0 and 1.2.0 without a click; 1.2.0 with `draft_tokens` 15, including the two
   LocalMaxxing runs.
-- **Linux**, with the release file of 1.1.0 as a user without root rights, in a fresh Ubuntu 24.04: install,
-  setup (including the stop at the missing compiler and the restart after installing it), first start,
-  benchmark, stop by signal, uninstall. That Ubuntu ran inside WSL 2, because the test machine has no second
-  operating system: kernel, file system and Python are Linux, the GPU driver is the one of Windows. For 1.2.0
-  the Linux file was not installed again: its engine scripts ran in a Linux environment for all measurements
-  above, and the unit tests pass on Linux.
+- **Linux**, with the AppImage of 1.3.0 as a user without root rights, in a fresh Ubuntu 24.04 without a
+  compiler: first start (the app installs itself and continues as the installed copy), setup including the
+  stop at the missing compiler and the restart after installing it (364 seconds), first start of the model
+  (154 seconds), benchmark, stop by signal, a later start with the command of the menu entry (44 seconds),
+  uninstall. Also: the start without FUSE (`--appimage-extract-and-run`), the update of an installed copy by a
+  newer build, and the update of an installation made with the `.run` file of 1.2.0. That Ubuntu ran inside
+  WSL 2, because the test machine has no second operating system: kernel and file system are Linux, the GPU
+  driver is the one of Windows.
 
-Not tested on a real machine: Linux on bare metal with the native NVIDIA driver; the window on a Linux desktop
-(only the terminal mode ran); distributions other than Ubuntu (the package manager commands for Fedora, Arch
-and openSUSE are untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a
-faked WSL only); Windows 10; the `lan` option; the preset `parallel-96k` on the GPU.
+Not tested on a real machine: Linux on bare metal with the native NVIDIA driver; the double-click in a file
+manager and the window on a Linux desktop (only the terminal mode ran); distributions other than Ubuntu (the
+bundled Python is built for glibc 2.17 and newer, the package manager commands for Fedora, Arch and openSUSE are
+untested); the path where WSL is missing or outdated on Windows (covered by unit tests with a faked WSL only);
+Windows 10; the `lan` option; the preset `parallel-96k` on the GPU.

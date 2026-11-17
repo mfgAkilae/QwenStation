@@ -1,0 +1,5 @@
+#!/bin/sh
+# Start file of Qwen Station on Linux, in the AppImage and in the installed copy alike.
+# -I: the bundled Python ignores PYTHON* variables and the user's own site-packages.
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/python/bin/python3" -I "$here/station/run-station.py" "$@"

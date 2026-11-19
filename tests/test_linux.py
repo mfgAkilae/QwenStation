@@ -65,6 +65,15 @@ class TempHome(unittest.TestCase):
 
 
 class NativeSetupTests(TempHome):
+    def test_a_fresh_process_reopens_the_custom_folder_after_a_failed_setup(self):
+        location = self.home / "disk" / "engine"
+        runner = FakeNative(self.config(), ["::step vllm start", "::step vllm fail"], code=1)
+        runner._run(str(location))
+        self.assertEqual(runner.state, "failed")
+        with mock.patch.object(config_module, "app_dir", return_value=self.home / "app"):
+            retry = FakeNative(load_config())
+        self.assertEqual(retry.default_location(), str(location))
+
     def test_a_full_run_copies_the_engine_and_provisions_below_the_folder(self):
         location = str(self.home / "disk" / "qwen-station")
         done = []
@@ -96,7 +105,8 @@ class NativeSetupTests(TempHome):
         snapshot = runner.snapshot()
         self.assertEqual((snapshot["state"], snapshot["error"]), ("failed", hint))
         self.assertEqual({step["id"]: step["status"] for step in snapshot["steps"]}["system"], "failed")
-        self.assertFalse(config_module.settings_path().exists())
+        self.assertEqual(self.saved(), {"mode": "native", "prefix": str(self.home / "engine-root")})
+        self.assertIsNone(runner.installed())
 
     def test_the_folder_must_be_absolute_writable_and_large_enough(self):
         runner = FakeNative(self.config())

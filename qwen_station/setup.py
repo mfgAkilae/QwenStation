@@ -305,6 +305,7 @@ class Setup:
             if step is None:
                 return
             if status == "active":
+                self._hint = ""
                 step.update(status="active", started=now, seconds=None)
                 return
             if step["started"]:
@@ -631,6 +632,8 @@ class NativeSetup(Setup):
     def _run_steps(self, location: str) -> None:
         config = self.config
         config.prefix = location
+        # Keep the chosen cache and models discoverable after an interruption, even before installed.json exists.
+        save_settings({"mode": "native", "prefix": location})
         self.log.add(f"=== Setup: folder {location}", "step")
 
         self._mark("files", "active")

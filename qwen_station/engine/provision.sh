@@ -77,11 +77,17 @@ step_venv() {
   "$UV" venv "$VENV" --python "$PYTHON_VERSION" --managed-python
 }
 
+install_packages() {
+  local step="$1"
+  shift
+  "$VENV/bin/python" "$ENGINE_DIR/package_install.py" "$step" "$UV" pip install --python "$VENV/bin/python" "$@"
+}
+
 step_vllm() {
   if [ -x "$VENV/bin/vllm" ] && ls "$VENV"/lib/python3*/site-packages | grep -q "^vllm-$VLLM_VERSION\.dist-info$"; then
     say "vLLM $VLLM_VERSION is installed."; return 0
   fi
-  "$UV" pip install --python "$VENV/bin/python" "vllm==$VLLM_VERSION" --torch-backend=auto
+  install_packages vllm "vllm==$VLLM_VERSION" --torch-backend=auto
 }
 
 step_cuda() {
@@ -90,7 +96,7 @@ step_cuda() {
     say "The CUDA compiler is present."
   else
     # shellcheck disable=SC2086
-    "$UV" pip install --python "$VENV/bin/python" --target "$PREFIX/cuda-sdk" $CUDA_SDK_PACKAGES || return 1
+    install_packages cuda --target "$PREFIX/cuda-sdk" $CUDA_SDK_PACKAGES || return 1
     [ -x "$sdk/bin/nvcc" ] || return 1
   fi
   # The pip packages are a runtime, not a toolkit: the linker looks in lib64 and wants unversioned names
@@ -139,7 +145,7 @@ step_kernels() {
   if ls "$VENV"/lib/python3*/site-packages | grep -q "^flashinfer_jit_cache_${KERNEL_ARCH}-${version}\.dist-info$"; then
     say "Prebuilt kernels ($KERNEL_ARCH, $version) are installed."; return 0
   fi
-  "$UV" pip install --python "$VENV/bin/python" --no-deps --index-url "$KERNEL_INDEX" \
+  install_packages kernels --no-deps --index-url "$KERNEL_INDEX" \
     "flashinfer-jit-cache==$version" "flashinfer-jit-cache-$KERNEL_ARCH==$version" ||
     say "No prebuilt kernels for $KERNEL_ARCH and FlashInfer $version; the first start compiles them itself."
   return 0

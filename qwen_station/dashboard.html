@@ -771,7 +771,7 @@ function renderNotice(s) {
       <ul>${needs}</ul>
       <div class="field"><label for="setupLocation">Folder for the engine and the model</label>
         <input id="setupLocation" type="text" spellcheck="false" autocomplete="off" value="${esc(setup.location)}"${update ? " disabled" : ""}>
-        <small>${linux ? "A fast SSD works best. The folder is created if it does not exist." : `A fast SSD works best. In WSL, the Linux environment is named “${esc(setup.distro)}”.`}</small></div>
+        <small>${linux ? "Use the same folder on retry. It keeps models in models/ and downloaded packages in cache/uv/." : `A fast SSD works best. In WSL, the Linux environment is named “${esc(setup.distro)}”.`}</small></div>
       <p class="setup-error" id="setupStartError" role="alert" style="margin:12px 0 0" hidden></p>
       <div class="actions"><button class="btn primary" data-act="setup"${blocked ? " disabled" : ""}>${update ? "Update" : "Set up"}</button>
         ${blocked ? `<button class="btn" data-act="setup-check">Check again</button>` : ""}</div>`;

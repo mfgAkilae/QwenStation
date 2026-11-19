@@ -69,6 +69,22 @@ at the end. You can delete the downloaded file afterwards; the app starts from t
 | Engine | Installs a compiler, uv, Python 3.12, vLLM with PyTorch, the CUDA compiler, the patches and prebuilt GPU kernels. |
 | Model | Downloads the model (17.9 GB) and the drafter (2.3 GB) from Hugging Face, pinned to fixed revisions. |
 
+**Retrying an interrupted setup.** Start the AppImage again and use the same engine folder. From 2.1.2-rc.1
+the app remembers a custom folder before starting the downloads. For a run interrupted on an older version,
+select its original folder once. Under that folder:
+
+- `models/` holds the target and drafter, including Hugging Face metadata and the station's hidden completion
+  markers. Keep those files together. Setup skips completed model revisions.
+- `cache/uv/` holds reusable packages. A retry can fetch incomplete or missing packages again.
+- `bin/`, `python/`, `venv/` and `cuda-sdk/` hold the installed tools. Leave the installation at its existing
+  path to reuse them. For a fresh engine in a different folder, copy `models/` and `cache/uv/` there first,
+  including hidden files, with setup stopped.
+
+During vLLM, CUDA and GPU kernel installation, the dashboard and terminal show how many MiB uv has written
+every ten seconds. These include unpacked files. The last package name can belong to any parallel download.
+After three minutes without observed CPU or I/O activity and with no build subprocess, setup retries once
+with one download at a time. A second stall in a required step shows the cache location and a retry action.
+
 On a fast connection (about 35 MB/s) the whole setup took 7.5 minutes. Every step can be repeated: a cancelled or
 failed setup continues where it stopped.
 
@@ -647,6 +663,13 @@ The Linux AppImage contains two parts from others, unchanged: CPython 3.12 as bu
 (MIT License).
 
 ## Tested, and not tested
+
+On 2026-11-19, the 2.1.2-rc.1 AppImage ran in native Linux mode under WSL. With uv 0.12.9 and a local
+wheel index, the dashboard showed activity at 2 MiB, allowed cancellation, reopened the custom folder after
+a restart, reported an HTTP timeout and completed the package step on **Try again**. Request counts confirmed
+that only the interrupted wheel was fetched again. In a separate offline setup, the AppImage built a fresh
+vLLM 0.32.0 environment using a copy of the existing package cache, managed Python, uv and both model revisions,
+and passed its final import check. Verification on a native NixOS machine is still open.
 
 Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
 

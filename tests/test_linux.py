@@ -65,6 +65,14 @@ class TempHome(unittest.TestCase):
 
 
 class NativeSetupTests(TempHome):
+    def test_interrupted_setup_retains_its_finish_time_across_polls(self):
+        runner = FakeNative(self.config())
+        runner.started_at = 100
+        with mock.patch.object(setup.time, "time", return_value=120):
+            runner._fail("vllm", "Cancelled")
+        with mock.patch.object(setup.time, "time", return_value=160):
+            self.assertEqual(runner.snapshot()["finished_at"], 120)
+
     def test_a_fresh_process_reopens_the_custom_folder_after_a_failed_setup(self):
         location = self.home / "disk" / "engine"
         runner = FakeNative(self.config(), ["::step vllm start", "::step vllm fail"], code=1)

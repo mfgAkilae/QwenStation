@@ -69,22 +69,6 @@ at the end. You can delete the downloaded file afterwards; the app starts from t
 | Engine | Installs a compiler, uv, Python 3.12, vLLM with PyTorch, the CUDA compiler, the patches and prebuilt GPU kernels. |
 | Model | Downloads the model (17.9 GB) and the drafter (2.3 GB) from Hugging Face, pinned to fixed revisions. |
 
-**Retrying an interrupted setup.** Start the AppImage again and use the same engine folder. From 2.1.2-rc.1
-the app remembers a custom folder before starting the downloads. For a run interrupted on an older version,
-select its original folder once. Under that folder:
-
-- `models/` holds the target and drafter, including Hugging Face metadata and the station's hidden completion
-  markers. Keep those files together. Setup skips completed model revisions.
-- `cache/uv/` holds reusable packages. A retry can fetch incomplete or missing packages again.
-- `bin/`, `python/`, `venv/` and `cuda-sdk/` hold the installed tools. Leave the installation at its existing
-  path to reuse them. For a fresh engine in a different folder, copy `models/` and `cache/uv/` there first,
-  including hidden files, with setup stopped.
-
-During vLLM, CUDA and GPU kernel installation, the dashboard and terminal show how many MiB uv has written
-every ten seconds. These include unpacked files. The last package name can belong to any parallel download.
-After three minutes without observed CPU or I/O activity and with no build subprocess, setup retries once
-with one download at a time. A second stall in a required step shows the cache location and a retry action.
-
 On a fast connection (about 35 MB/s) the whole setup took 7.5 minutes. Every step can be repeated: a cancelled or
 failed setup continues where it stopped.
 
@@ -117,6 +101,25 @@ setup starts right away and prints its progress in the terminal.
 | App | The AppImage copies its content to `~/.local/share/qwen-station/app` (46 MB) and adds the command `~/.local/bin/qwen-station` and a menu entry. |
 | Engine | uv, a Python 3.12 of its own, vLLM with PyTorch, the CUDA compiler, the patches and prebuilt GPU kernels, all below one folder (default `~/.local/share/qwen-station`). |
 | Model | Downloads the model (17.9 GB) and the drafter (2.3 GB) from Hugging Face, pinned to fixed revisions. |
+
+**Retrying an interrupted setup.** Start the AppImage again and use the same engine folder. From 2.1.2-rc.1
+the app remembers a custom folder before starting the downloads. For a run interrupted on an older version,
+select its original folder once. Under that folder:
+
+- `models/` holds the target and drafter, including Hugging Face metadata and the station's hidden completion
+  markers. Keep those files together. Setup skips completed model revisions.
+- `cache/uv/` holds reusable packages. A retry can fetch incomplete or missing packages again.
+- `bin/`, `python/`, `venv/` and `cuda-sdk/` hold the installed tools. Leave the installation at its existing
+  path to reuse them. For a fresh engine in a different folder, copy `models/` and `cache/uv/` there first,
+  including hidden files, with setup stopped.
+
+During vLLM, CUDA and GPU kernel installation, the dashboard and terminal show how many MiB uv has written
+every ten seconds. These include unpacked files. The last package name can belong to any parallel download.
+After three minutes without observed CPU or I/O activity and with no build subprocess, setup retries once
+with one download at a time. A second stall in a required step shows the cache location and a retry action.
+
+After an interrupted first installation, **Change folder** returns to the location field. **Try again**
+uses the existing folder and its cache.
 
 If the system has no C++ compiler, the setup tries `sudo` without a password and the graphical password prompt.
 If neither works it stops and shows the command to run once, for example
@@ -638,10 +641,15 @@ served page, so other websites cannot control the app.
 ```powershell
 python run-station.py --mock            # fake server instead of the model: the dashboard without a GPU
 python run-station.py --check           # state of the installation as JSON
-python -m unittest discover -s tests    # 128 tests; they start the mock server as a real subprocess
+python -m unittest discover -s tests    # includes starting the mock server as a real subprocess
 .\build-exe.ps1 -Release                # dist\Qwen-Station-Setup-<version>.exe with its SHA256 file
 python3 build-linux.py                  # on Linux: dist/Qwen-Station-<version>-x86_64.AppImage with its SHA256 file
 ```
+
+To run the dashboard regression tests, start a separate station with `--mock --no-autostart --no-window --keep`.
+Set `QWEN_STATION_TEST_URL` to its dashboard URL. With Node.js, `playwright-core` and Chromium available,
+set `CHROME_PATH` to the browser executable and run `node --test tests/dashboard.cjs`. The suite starts
+and stops the mock model and exercises the settings dialog.
 
 `build-exe.ps1` creates its own venv in `.build\` and installs PyInstaller there. `build-linux.py` runs on Linux
 (WSL works) and needs `mksquashfs` from the package squashfs-tools. It downloads two files, pinned by SHA256: the
@@ -663,6 +671,11 @@ The Linux AppImage contains two parts from others, unchanged: CPython 3.12 as bu
 (MIT License).
 
 ## Tested, and not tested
+
+On 2026-11-19 the 2.1.2-rc.2 Windows executable and Linux AppImage each passed seven Chromium dashboard
+tests, including mock model start/stop, settings validation, failed actions, clipboard fallback and slow
+status requests. A separate AppImage run under WSL exercised a failed native setup, the timer after failure,
+and selecting another folder for a retry.
 
 On 2026-11-19, the 2.1.2-rc.1 AppImage ran in native Linux mode under WSL. With uv 0.12.9 and a local
 wheel index, the dashboard showed activity at 2 MiB, allowed cancellation, reopened the custom folder after

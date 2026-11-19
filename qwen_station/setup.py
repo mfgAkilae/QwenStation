@@ -174,6 +174,7 @@ class Setup:
         self.error = ""
         self.fresh = False  # set once this process finished a setup: the first model start compiles kernels
         self.started_at: float | None = None
+        self.finished_at: float | None = None
         self.on_done = lambda: None
         self.labels = {key: label for key, label, _ in self.steps}
         self._steps = {key: {"status": "pending", "progress": None, "started": None, "seconds": None}
@@ -294,7 +295,7 @@ class Setup:
             return {"state": self.state, "reason": self.reason, "error": self.error, "fresh": self.fresh,
                     "checks": self.checks if self.state == "needed" else [],
                     "steps": steps if self.state in ("running", "failed") else [],
-                    "started_at": self.started_at,
+                    "started_at": self.started_at, "finished_at": self.finished_at,
                     "location": self.default_location(), "platform": self.platform,
                     "distro": self.config.distro, "min_free_gb": self.min_free_gb}
 
@@ -332,6 +333,7 @@ class Setup:
             self.state = "running"
             self.error = ""
             self.started_at = time.time()
+            self.finished_at = None
             self._cancelled = False
             self._hint = ""
             for step in self._steps.values():
@@ -381,6 +383,7 @@ class Setup:
         self.log.add(f"Setup failed: {message}", "error")
         with self._lock:
             self.error = message
+            self.finished_at = time.time()
             self.state = "failed"
 
     def _distro_hint(self, seen: int) -> str:

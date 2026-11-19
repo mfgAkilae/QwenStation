@@ -304,6 +304,7 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
 
 <div class="wrap">
   <div class="banner" id="banner" role="alert"></div>
+  <div class="banner" id="connectionError" role="alert"></div>
 
   <header class="top">
     <div class="ident">
@@ -559,22 +560,31 @@ function secondsText(value) {
 const clock = (t) => new Date(t * 1000).toLocaleTimeString("en-GB");
 
 /* ---------- API ---------- */
-async function api(path, body) {
+async function api(path, body, signal) {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
     headers: { "X-Station-Token": TOKEN, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-    body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store",
+    body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", signal,
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.error || (response.status === 403 ? "Access denied (HTTP 403). Reload the dashboard and try again." : `HTTP ${response.status}`));
+  }
   return response.json();
 }
 
-async function poll() {
+let pendingPoll = null;
+function poll() {
   if (store.quit) return;
+  if (!pendingPoll) pendingPoll = refreshState().finally(() => { pendingPoll = null; });
+  return pendingPoll;
+}
+async function refreshState() {
   try {
-    const data = await api(`/api/state?since=${store.lastT}&log=${store.logSeq}&req=${store.reqSeq}`);
+    const data = await api(`/api/state?since=${store.lastT}&log=${store.logSeq}&req=${store.reqSeq}`, undefined, AbortSignal.timeout(8000));
+    if (store.quit) return;
     store.failures = 0;
-    $("banner").style.display = "none";
+    $("connectionError").style.display = "none";
     if (store.state && data.generation !== store.state.generation) { store.requests = []; }
     if (data.request_seq < store.reqSeq) { store.requests = []; }
     store.state = data;
@@ -588,10 +598,9 @@ async function poll() {
     render();
   } catch (error) {
     store.failures += 1;
-    if (store.failures >= 3) {
-      $("banner").textContent = "No connection to Qwen Station. The app is no longer running. "
-        + (store.state && store.state.station.platform === "linux" ? "Run qwen-station to start it again." : "Open Qwen-Station.exe to start it again.");
-      $("banner").style.display = "block";
+    if (!store.quit && store.failures >= 3) {
+      $("connectionError").textContent = "Cannot reach Qwen Station. Reconnecting…";
+      $("connectionError").style.display = "block";
       setStatus("off", "off", "Disconnected", "");
     }
   }
@@ -653,7 +662,8 @@ function render() {
     for (const [key, value] of Object.entries(s.presets)) select.add(new Option(`${value.label}`, key));
   }
   const running = ["starting", "ready", "stopping", "preflight"].includes(s.state);
-  if (document.activeElement !== select) select.value = s.preset;
+  if (running || inSetup(s)) selectedPreset = null;
+  select.value = selectedPreset ?? s.preset;
   select.disabled = running || inSetup(s);
   select.title = running ? "Stop the model to switch presets" : s.presets[select.value].note;
   const primary = $("primary");
@@ -801,7 +811,7 @@ function renderSetup(s) {
   const gb = (bytes) => nf1.format(bytes / 1e9);
   $("setupError").hidden = !failed;
   $("setupError").textContent = failed ? setup.error : "";
-  $("elapsed").textContent = duration(s.now - setup.started_at);
+  $("elapsed").textContent = duration((setup.finished_at ?? s.now) - setup.started_at);
   let done = 0, total = 0, active = null;
   $("steps").innerHTML = setup.steps.map((step) => {
     total += step.weight;
@@ -829,7 +839,10 @@ function renderSetup(s) {
   }
   $("eta").textContent = eta;
   $("lastline").textContent = store.log.length ? store.log[store.log.length - 1].text : "";
-  const actions = failed ? `<button class="btn primary" data-act="setup">Try again</button>` : `<button class="btn" data-act="setup-cancel">Cancel</button>`;
+  let actions = failed ? `<button class="btn primary" data-act="setup">Try again</button>` : `<button class="btn" data-act="setup-cancel">Cancel</button>`;
+  if (failed && setup.platform === "linux" && setup.reason === "install") {
+    actions += `<button class="btn" data-act="setup-check">Change folder</button>`;
+  }
   if ($("setupActions").dataset.html !== actions) { $("setupActions").innerHTML = actions; $("setupActions").dataset.html = actions; }
 }
 
@@ -1110,9 +1123,22 @@ function barChart(el, rates) {
 }
 
 /* ---------- actions ---------- */
+let selectedPreset = null;
+$("preset").addEventListener("change", (event) => { selectedPreset = event.target.value; });
+function actionError(message) {
+  $("banner").textContent = message;
+  $("banner").style.display = message ? "block" : "none";
+}
 async function act(path, body) {
-  try { await api(path, body || {}); } catch (error) { $("banner").textContent = `Action failed: ${error.message}`; $("banner").style.display = "block"; }
-  poll();
+  try {
+    const result = await api(path, body || {});
+    if (result.ok === false) throw new Error(result.error || "The station cannot do this in its current state.");
+    actionError("");
+    return true;
+  } catch (error) {
+    actionError(`Action failed: ${error.message}`);
+    return false;
+  } finally { poll(); }
 }
 $("primary").addEventListener("click", () => {
   const s = store.state;
@@ -1131,16 +1157,16 @@ async function startSetup() {
   } catch (error) { message = `Setup could not start: ${error.message}`; }
   const box = $("setupStartError");
   if (box) { box.textContent = message; box.hidden = !message; }
-  else if (message) { $("banner").textContent = message; $("banner").style.display = "block"; }
+  actionError(box ? "" : message);
   poll();
 }
 $("hero").addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.id === "setupLocation") startSetup(); });
-$("hero").addEventListener("click", (event) => {
+$("hero").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-act]");
   if (button && button.dataset.act === "setup") { startSetup(); return; }
   if (button && button.dataset.act === "setup-check") { act("/api/setup/check"); return; }
   if (button && button.dataset.act === "setup-restart") {
-    if (confirm("Restart Windows now? Unsaved work in other programs will be lost.")) { store.quit = true; act("/api/setup/restart"); }
+    if (confirm("Restart Windows now? Unsaved work in other programs will be lost.") && await act("/api/setup/restart")) store.quit = true;
     return;
   }
   if (button && button.dataset.act === "setup-cancel") {
@@ -1160,14 +1186,15 @@ $("quit").addEventListener("click", async () => {
   const owns = s && ["starting", "ready"].includes(s.state) && !s.external;
   if (owns && !confirm("Stop the model and quit Qwen Station?")) return;
   if (s && s.setup && s.setup.state === "running" && !confirm("Setup is still running. Cancel it and quit Qwen Station?")) return;
+  $("quit").disabled = true;
+  if (!await act("/api/quit")) { $("quit").disabled = false; return; }
   store.quit = true;
-  try { await api("/api/quit", {}); } catch (error) { /* the process may already be gone */ }
-  document.body.innerHTML = `<div class="wrap"><div class="notice" style="margin-top:20vh"><h2>Qwen Station has quit</h2><p>The model is stopped and the VRAM is being freed. You can close this window.</p></div></div>`;
+  document.body.innerHTML = `<div class="wrap"><div class="notice" style="margin-top:20vh"><h2>Qwen Station is quitting</h2><p>You can close this window.</p></div></div>`;
   setTimeout(() => window.close(), 1200);
 });
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy]");
-  if (button) copyText(button, $(button.dataset.copy).textContent);
+  if (button) copyText(button, $(button.dataset.copy));
 });
 /* ---------- settings ---------- */
 const sheet = $("settings");
@@ -1315,8 +1342,9 @@ function fillSettings(data) {
 }
 async function openSettings() {
   try { fillSettings(await api("/api/settings")); } catch (error) {
-    $("banner").textContent = `The settings could not be loaded: ${error.message}`; $("banner").style.display = "block"; return;
+    actionError(`The settings could not be loaded: ${error.message}`); return;
   }
+  actionError("");
   sheet.showModal();
 }
 async function saveSettings() {
@@ -1338,9 +1366,21 @@ async function saveSettings() {
   settingsFoot(result.pending.length ? "Saved. The running model keeps its settings until it starts again."
     : "Saved. The dashboard uses its new port the next time Qwen Station starts.", "good");
 }
-function copyText(button, text) {
-  const label = button.textContent;
-  navigator.clipboard.writeText(text).then(() => { button.textContent = "Copied"; setTimeout(() => { button.textContent = label; }, 1400); });
+async function copyText(button, source) {
+  try {
+    await navigator.clipboard.writeText(source.textContent);
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = "Copy"; }, 1400);
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(source);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const message = "Clipboard unavailable. Copy the selected text manually (Ctrl+C or ⌘C).";
+    if (sheet.open) settingsFoot(message);
+    else actionError(message);
+  }
 }
 $("openSettings").addEventListener("click", openSettings);
 $("settingsCancel").addEventListener("click", () => sheet.close());
@@ -1360,7 +1400,7 @@ sheet.addEventListener("input", edited);
 $("address").addEventListener("pointerdown", () => { setRadio("reach", "one"); edited(); });  // choosing an address means this option
 $("keyNew").addEventListener("click", () => { keyDraft = newKey(); edited(); });
 $("keyClear").addEventListener("click", () => { keyDraft = keyDraft === undefined ? "" : undefined; edited(); });  // Remove, or Undo
-$("keyCopy").addEventListener("click", () => copyText($("keyCopy"), keyDraft));
+$("keyCopy").addEventListener("click", () => copyText($("keyCopy"), $("keyValue")));
 sheet.addEventListener("close", () => { keyDraft = undefined; $("keyValue").textContent = ""; });  // shown once: gone with the window
 sheet.querySelector(".sheet-nav").addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab]");

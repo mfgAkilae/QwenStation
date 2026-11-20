@@ -136,6 +136,29 @@ STAND_IN_PROTOCOL = '''class Request:
         )
 '''
 
+STAND_IN_CHAT_PROTOCOL = '''def merge_kwargs(defaults, overrides):
+    return {**(defaults or {}), **(overrides or {})}
+
+
+class Request:
+    def __init__(self, model, chat_template=None, chat_template_kwargs=None, reasoning_effort=None):
+        self.model = model
+        self.chat_template = chat_template
+        self.chat_template_kwargs = chat_template_kwargs
+        self.reasoning_effort = reasoning_effort
+
+    def build_chat_params(self, default_template):
+        extra_kwargs = dict()
+        user_kwargs = self.chat_template_kwargs or {}
+        if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
+        return dict(
+            chat_template=self.chat_template or default_template,
+            chat_template_kwargs=merge_kwargs(self.chat_template_kwargs, extra_kwargs),
+        )
+'''
+
 
 class FakeSetup(setup.Setup):
     """Setup without WSL: the streamed commands are recorded and answered from a script."""
@@ -395,7 +418,8 @@ class BundleTests(unittest.TestCase):
     def test_bundled_patches_are_complete(self):
         patches = sorted((ENGINE / "patches").glob("*.py"))
         self.assertEqual([patch.name for patch in patches],
-                         ["patch-vllm-autotune-seed.py", "patch-vllm-dflash-quant.py", "patch-vllm-eagle-group.py",
+                         ["patch-vllm-adapter-template.py", "patch-vllm-autotune-seed.py", "patch-vllm-dflash-quant.py",
+                          "patch-vllm-eagle-group.py",
                           "patch-vllm-fp8-group-size.py", "patch-vllm-main-first.py",
                           "patch-vllm-offload-draft-window.py",
                           "patch-vllm-swblock-divisor.py"])
@@ -533,6 +557,62 @@ class BundleTests(unittest.TestCase):
                 os.environ.pop(key, None)
             self.assertEqual(ask("m-subagent"), (0, 262144))  # the setting off: the same model under two names
 
+    def test_the_adapter_patch_gives_the_adapter_its_template_and_no_thinking(self):
+        """The patch for the OpenCode adapter, run against a stand-in for vLLM's chat request."""
+        import subprocess
+        import types
+
+        patch = ENGINE / "patches" / "patch-vllm-adapter-template.py"
+        with tempfile.TemporaryDirectory() as prefix:
+            vllm = Path(prefix, "lib", "python3.12", "site-packages", "vllm")
+            target = vllm / "entrypoints" / "openai" / "chat_completion" / "protocol.py"
+
+            def run():
+                done = subprocess.run([sys.executable, str(patch)], env={**os.environ, "VLLM_PREFIX": prefix},
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return done.stdout.split()[0].rstrip(":")
+
+            self.assertEqual(run(), "PATCH_NOT_APPLICABLE")  # no vLLM at all
+            target.parent.mkdir(parents=True)
+            self.assertEqual(run(), "PATCH_NOT_APPLICABLE")  # a vLLM without this file
+            target.write_text("# another version\n", encoding="utf-8")
+            self.assertEqual(run(), "PATCH_NOT_APPLICABLE")  # code that moved on stays as it is
+            self.assertEqual(target.read_text(encoding="utf-8"), "# another version\n")
+            target.write_text(STAND_IN_CHAT_PROTOCOL, encoding="utf-8")
+            self.assertEqual(run(), "PATCH_APPLIED")
+            patched = target.read_text(encoding="utf-8")
+            self.assertEqual(run(), "PATCH_ALREADY_APPLIED")
+            self.assertEqual(target.read_text(encoding="utf-8"), patched)
+            self.assertEqual(Path(str(target) + ".pre-adapter-template.bak").read_text(encoding="utf-8"),
+                             STAND_IN_CHAT_PROTOCOL)
+            template = Path(prefix, "chat_template.jinja")
+            template.write_text("adapter template", encoding="utf-8")
+
+            def ask(*args, **kwargs):
+                module = types.ModuleType("protocol")  # fresh, so the template cache starts empty
+                exec(compile(patched, "protocol.py", "exec"), module.__dict__)
+                params = module.Request(*args, **kwargs).build_chat_params("server template")
+                return params["chat_template"], params["chat_template_kwargs"]
+
+            names = {"VLLM_QWEN38_ADAPTER_MODEL": "m-opencode", "VLLM_QWEN38_ADAPTER_TEMPLATE": str(template)}
+            with mock.patch.dict(os.environ, names):
+                self.assertEqual(ask("m-opencode"), ("adapter template", {"enable_thinking": False}))
+                self.assertEqual(ask("m"), ("server template", {}))  # the model itself is rendered as before
+                self.assertEqual(ask("m-subagent"), ("server template", {}))
+                # What the request asks for wins: its own template, thinking on, a reasoning effort.
+                self.assertEqual(ask("m-opencode", chat_template="own"), ("own", {"enable_thinking": False}))
+                self.assertEqual(ask("m-opencode", chat_template_kwargs={"enable_thinking": True}),
+                                 ("adapter template", {"enable_thinking": True}))
+                self.assertEqual(ask("m-opencode", reasoning_effort="low"),
+                                 ("adapter template", {"enable_thinking": True}))
+            with mock.patch.dict(os.environ, {**names, "VLLM_QWEN38_ADAPTER_TEMPLATE": str(template) + ".gone"}):
+                self.assertEqual(ask("m-opencode"), ("server template", {"enable_thinking": False}))
+            with mock.patch.dict(os.environ, {}):
+                for key in names:
+                    os.environ.pop(key, None)
+                self.assertEqual(ask("m-opencode"), ("server template", {}))  # the setting off: nothing changes
+
     def test_engine_pins_are_complete(self):
         pins = dict(line.split("=", 1) for line in (ENGINE / "engine.env").read_text(encoding="utf-8").splitlines()
                     if "=" in line and not line.startswith("#"))
@@ -540,6 +620,9 @@ class BundleTests(unittest.TestCase):
             self.assertTrue(pins.get(key), key)
         self.assertEqual(pins["TARGET_DIR"], config_module.TARGET_DIR)
         self.assertEqual(pins["DRAFTER_DIR"], config_module.DRAFTER_DIR)
+        self.assertEqual(pins["ADAPTER_REPO"], config_module.ADAPTER_REPO)
+        self.assertRegex(pins["ADAPTER_REV"], r"^[0-9a-f]{40}$")
+        self.assertIn("step_adapter()", (ENGINE / "provision.sh").read_text(encoding="utf-8"))
         self.assertTrue(setup.bundled_engine_version())
         golden = f"flashinfer-0.7.0.post1-sm120-{config_module.MODEL_ID}.json"
         self.assertTrue((ENGINE / "autotune" / golden).is_file())

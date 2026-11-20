@@ -10,6 +10,7 @@
 #   KV_OFFLOAD_GIB                sessions pushed out of the GPU are kept in this much RAM (0 or unset: off)
 #   SUBAGENT_CTX                  main session first: requests for the subagent model yield to the main session and
 #                                 get this context (0 or unset: off, the subagent name is then the same model)
+#   OPENCODE_ADAPTER              1: serve the OpenCode LoRA adapter as a third model name (downloaded if missing)
 #   EXTRA_ARGS                    appended to `vllm serve`; later arguments win
 #   XQA_DECODE, SPEC_MODE, SPEC_TOKENS, DRAFTER_NAME, KV_GROUP_SIZE, AUTOTUNE_PIN   switches for experiments, see below
 #
@@ -133,6 +134,29 @@ if [ "${SUBAGENT_CTX:-0}" != 0 ]; then
   log "--- Main session first: ${SERVED_NAMES[1]} gets up to $SUBAGENT_CTX tokens and yields to the main session"
 fi
 
+# OpenCode adapter (OPENCODE_ADAPTER=1): a LoRA adapter trained with reinforcement learning for the OpenCode harness,
+# served beside the model under a name of its own; requests for the other names do not use it.
+# patch-vllm-adapter-template.py renders its requests with the chat template it was trained with, and without
+# thinking. Measured 2026-11-20 for code: the same draft acceptance; its requests decode about 29 % slower than the
+# model on a server without it, and the model's own about 11 % slower while it is loaded.
+LORA_ARGS=()
+if [ "${OPENCODE_ADAPTER:-0}" = 1 ]; then
+  ADAPTER_PATH="$MODELS/$ADAPTER_DIR"
+  [ -f "$ADAPTER_PATH/.complete-$ADAPTER_REV" ] || ADAPTER_PATH="$PREFIX/models/$ADAPTER_DIR"
+  if [ ! -f "$ADAPTER_PATH/.complete-$ADAPTER_REV" ]; then
+    log "--- Downloading the OpenCode adapter ($ADAPTER_REPO, about $((ADAPTER_BYTES / 1000000)) MB)"
+    bash "$ENGINE_DIR/provision.sh" adapter 2>&1 | grep --line-buffered -v '^::' | tee -a "$LOG"
+  fi
+  if [ -f "$ADAPTER_PATH/.complete-$ADAPTER_REV" ]; then
+    ADAPTER_MODEL="${SERVED_NAMES[0]}-opencode"
+    LORA_ARGS=(--enable-lora --max-lora-rank "$ADAPTER_RANK" --max-loras 1 --lora-modules "$ADAPTER_MODEL=$ADAPTER_PATH")
+    export VLLM_QWEN38_ADAPTER_MODEL="$ADAPTER_MODEL" VLLM_QWEN38_ADAPTER_TEMPLATE="$ADAPTER_PATH/chat_template.jinja"
+    log "--- OpenCode adapter: model $ADAPTER_MODEL"
+  else
+    log "WARNING: The OpenCode adapter could not be downloaded. The model starts without it."
+  fi
+fi
+
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -181,7 +205,7 @@ echo running > "$STATUS"
 "$VENV/bin/vllm" serve "$MODELS/$TARGET_NAME" \
   --host "${VLLM_HOST:-127.0.0.1}" --port "${VLLM_PORT:-8000}" --served-model-name "${SERVED_NAMES[@]}" \
   --quantization "$TARGET_QUANT" --linear-backend auto "${KV_ARGS[@]}" \
-  "${SPEC_ARGS[@]}" "${OFFLOAD_ARGS[@]}" "${PRIORITY_ARGS[@]}" \
+  "${SPEC_ARGS[@]}" "${OFFLOAD_ARGS[@]}" "${PRIORITY_ARGS[@]}" "${LORA_ARGS[@]}" \
   --max-model-len "${CTX:-262144}" --gpu-memory-utilization "${GPU_UTIL:-0.92}" \
   --max-num-seqs "$MAX_SEQS" --max-num-batched-tokens "$PREFILL_BATCH" --long-prefill-token-threshold "$PREFILL_BATCH" \
   --enable-prefix-caching --enable-prompt-tokens-details --cudagraph-capture-sizes 1 2 4 8 16 32 64 128 \

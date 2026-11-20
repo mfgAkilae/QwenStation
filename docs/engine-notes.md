@@ -233,6 +233,32 @@ cache. vLLM's native CPU offloading (`--kv-offloading-size`) copies blocks that 
 - `blocks_per_chunk` 2, which should have made the window fit into one chunk, changed nothing. Decode with
   offloading on is within a few percent of the speed without (single runs: 372 to 417 against 417 to 437).
 
+**The OpenCode adapter runs as LoRA beside the model, with its own chat template** (setting "OpenCode adapter",
+a test option since 2026-11-20). vLLM 0.32.0 serves the LoRA adapter `harness-hub/Qwen3.8-27B-opencode-adapted`
+(rank 32 on q, k, v, o, gate, up and down; 16 attention layers and all 64 MLPs) on the NVFP4 target together with
+the DFlash2 drafter and the V2 model runner; nothing in vLLM blocks the combination, and the drafter leaves the
+target's LoRA out on purpose. Measured with the same context and KV pool: weights 18.54 instead of 18.02 GiB, CUDA
+graphs 0.35 instead of 0.38 GiB. Decode for code (a Python module with tests and a TypeScript class, 700 tokens,
+greedy, two runs each): 391 tok/s without LoRA; with LoRA 348 for the model and 278 for the adapter. The tokens
+kept per round stay at 6.0 to 6.2. A shell script with an explanation kept fewer tokens per round in every
+setup (3.2 to 4.4) and gave 201 to 233 tok/s, without a clear order.
+
+The target's chat template (`qwen3.8-gittensor-safe-v2`) differs from the upstream template the adapter was
+trained with, in the system part (tool instructions) and in every assistant turn (the empty thinking block of
+earlier turns). Rendered side by side for an OpenCode conversation, no line of the tool part matched. vLLM has one
+template per server and none per LoRA, so `patch-vllm-adapter-template.py` picks the adapter's file for requests
+to its model name, and switches thinking off there unless the request asks for it. Checked 2026-11-20 on the
+running server through the prompt token ids of one-token requests: the model's own name keeps the target's
+template, the adapter's name gets the upstream one with the empty thinking block.
+
+First check of the claim (one small task, so only a sign): OpenCode 2.3.2 in an isolated home fixed a slug
+function with a failing unit test three times per model, every run with the tests passing afterwards. The model
+at reasoning `medium`: 127 to 173 s, 49 to 64 requests, 18,680 to 26,126 generated tokens. The adapter: 34 to
+87 s, 13 to 36 requests, 2,953 to 9,084 generated tokens.
+
+Merging the adapter into the weights would avoid the slower decode, but needs the BF16 model (54 GB) and a new
+NVFP4 quantization, whose recipe for this checkpoint is not published.
+
 ## Tried and dropped
 
 - **B12X** (`b12x` 1.5.1, the version vLLM 0.32 pins; measured 2026-11-17 in rounds per second, which do not

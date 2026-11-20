@@ -6,6 +6,7 @@
 #   provision.sh all              full installation
 #   provision.sh <step> [...]     single steps: system uv venv vllm cuda patches kernels target drafter verify
 #   provision.sh model-unsloth    optional second target
+#   provision.sh adapter          optional LoRA adapter for OpenCode (serve.sh runs it when the setting is on)
 #
 # Lines starting with "::" are machine-readable progress for Qwen Station:
 #   ::step <id> start|done|skip|fail      ::progress <id> <bytes> <total>      ::hint <id> <what the user can do>
@@ -172,6 +173,7 @@ download_model() {
 step_target()  { download_model target  "$TARGET_REPO"  "$TARGET_REV"  "$TARGET_DIR"  "$TARGET_BYTES"; }
 step_drafter() { download_model drafter "$DRAFTER_REPO" "$DRAFTER_REV" "$DRAFTER_DIR" "$DRAFTER_BYTES"; }
 step_unsloth() { download_model unsloth "$UNSLOTH_REPO" "$UNSLOTH_REV" "$UNSLOTH_DIR" "$UNSLOTH_BYTES"; }
+step_adapter() { download_model adapter "$ADAPTER_REPO" "$ADAPTER_REV" "$ADAPTER_DIR" "$ADAPTER_BYTES"; }
 
 step_verify() {
   "$VENV/bin/python" -c "import vllm, torch; print('vLLM', vllm.__version__, '| torch', torch.__version__, '| CUDA visible:', torch.cuda.is_available())" || return 1
@@ -194,6 +196,7 @@ for request in "$@"; do
   case "$request" in
     all) for id in system uv venv vllm cuda patches kernels target drafter verify; do run "$id"; done ;;
     model-unsloth) run unsloth; run verify ;;
+    adapter) run adapter ;;
     system|uv|venv|vllm|cuda|patches|kernels|target|drafter|verify) run "$request" ;;
     *) say "Unknown step: $request"; exit 2 ;;
   esac

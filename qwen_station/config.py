@@ -14,6 +14,10 @@ MODEL_ID = "qwen38-gittensor-dflash"
 # The same model under a second name, for subagents. With "main session first" their requests yield to the main
 # session and get the context left beside it; without, the name works like the first one. Costs no VRAM.
 SUBAGENT_MODEL_ID = MODEL_ID + "-subagent"
+# The OpenCode adapter (setting "opencode_adapter"): a LoRA adapter trained for the OpenCode harness, served beside
+# the model under this name. Requests for the other names do not use it.
+ADAPTER_MODEL_ID = MODEL_ID + "-opencode"
+ADAPTER_REPO = "harness-hub/Qwen3.8-27B-opencode-adapted"
 MODEL_TITLE = "Qwen3.8 27B"
 # How the KV cache stores keys and values: NVFP4 (4 bit, the default since 2.0) or FP8.
 KV_CACHE_TYPES = {"nvfp4": "NVFP4", "fp8": "FP8"}
@@ -113,6 +117,7 @@ class Config:
     fit_context: bool = True  # shrink the context when too little VRAM is free, instead of paging
     draft_tokens: int = DEFAULT_DRAFT_TOKENS  # per round; single-slot presets only
     vision: bool = False  # load the image encoder: requests may contain images, at the cost of some VRAM
+    opencode_adapter: bool = False  # serve the OpenCode LoRA adapter as model ADAPTER_MODEL_ID (a test option)
     slots: int = 1  # requests the server works on at the same time; they share the context
     main_first: bool = False  # with slots > 1: the main session always has room for the full context, subagents
     #                           (model SUBAGENT_MODEL_ID) get what is left and yield to it
@@ -255,6 +260,7 @@ _FILE_KEYS = {
     "fit_context": bool,
     "draft_tokens": int,
     "vision": bool,
+    "opencode_adapter": bool,
     "slots": int,
     "ram_cache_gib": int,
     "kv_cache": str,

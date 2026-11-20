@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__, installer, metrics
-from .config import (AGENT_IDS, MODEL_ID, SUBAGENT_MODEL_ID, model_subtitle, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
+from .config import (ADAPTER_MODEL_ID, AGENT_IDS, MODEL_ID, SUBAGENT_MODEL_ID, model_subtitle, MODEL_TITLE, PRESETS, Config, data_dir, load_config,
                      resource_path)
 from . import clients, settings
 from .config import save_settings, settings_path
@@ -153,7 +153,10 @@ class Station:
                         "lan": self.config.lan,
                         "window_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None},
             "model": {"id": MODEL_ID, "title": MODEL_TITLE, "vision": self.config.vision,
-                      "subtitle": model_subtitle(self.config.kv_cache) + (", vision" if self.config.vision else ""),
+                      "subtitle": model_subtitle(self.config.kv_cache) + (", vision" if self.config.vision else "")
+                      + (", OpenCode adapter" if self.config.opencode_adapter else ""),
+                      # The OpenCode adapter: served as a model of its own beside this one, while the setting is on
+                      "adapter_id": ADAPTER_MODEL_ID if self.config.opencode_adapter else "",
                       "kv_cache": self.config.kv_cache,
                       "ram_cache_gib": self.config.ram_cache_gib,
                       "context": snapshot["context"],
@@ -646,6 +649,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "(model " + SUBAGENT_MODEL_ID + ") get what is left and yield to it")
     parser.add_argument("--vision", action="store_true", default=None,
                         help="Load the image encoder, so requests may contain images (costs VRAM, so context)")
+    parser.add_argument("--opencode-adapter", action="store_true", dest="opencode_adapter", default=None,
+                        help="Also serve the OpenCode LoRA adapter, as model " + ADAPTER_MODEL_ID + " (a test option)")
     parser.add_argument("--draft-tokens", type=int, dest="draft_tokens",
                         help="Draft tokens per round (default 7). More speeds up reasoning and code, and costs context")
     parser.add_argument("--keep", action="store_const", const="keep", dest="close_action", default=None,
@@ -685,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
                      ("root", "preset", "lan", "api_host", "station_port", "api_port", "autostart", "open_window",
                       "close_action",
                       "mock", "extra_args", "vllm_prefix", "model_base", "extra_env", "fit_context", "draft_tokens", "vision", "slots", "main_first", "ram_cache_gib", "kv_cache",
-                      "register_clients", "agents")}
+                      "opencode_adapter", "register_clients", "agents")}
         config = load_config(args.config, overrides)
         if config.mock:
             if args.api_port is None:

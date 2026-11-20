@@ -21,6 +21,7 @@ file. Steps for [Windows](#install-on-windows) and for [Linux](#install-on-linux
 | **An orchestrator that comes first** | Optional: the main session of a coding agent keeps the full context and goes first, subagents get the rest. [Main session first](#main-session-first) |
 | **Large sessions that take turns** | Kept in RAM, a session that another one pushed out of the GPU comes back in 1 second instead of 27. Made for two agents with 120,000 tokens each. [Sessions in RAM](#sessions-in-ram) |
 | **Vision** | Optional: up to 4 images per request. [Vision](#vision) |
+| **OpenCode adapter (test)** | Optional: a LoRA adapter that Hugging Face trained for OpenCode, served as a second model. Its model card reports more solved tasks with far fewer turns and tokens. [OpenCode adapter](#opencode-adapter-test) |
 | **Your choice of coding agent** | T3 Code, OpenCode, Pi, DeepSeek Harness and Copilot in VS Code get the model with the right context size. None is touched until you switch it on in the settings; then Qwen Station only adds its own entry to its config. [Coding agents](#coding-agents) |
 | **One settings window** | Network, API key, slots, RAM, vision, draft tokens and the coding agents in one place. There is a settings file and there are command line options too. [Settings](#settings) |
 | **Stays out of your system** | On Windows it runs in a WSL distribution of its own, on Linux in one folder of your user. Both can be removed completely. [Remove](#remove) |
@@ -198,6 +199,8 @@ and the reasoning levels `low`, `medium` and `xhigh`.
   Choose it where your agent sets the model of its subagents, for example `agent.<name>.model` in OpenCode or
   the model of a delegated task in T3 Code. The entry stays when you switch the setting off; the name then works
   like the main model.
+- **OpenCode adapter:** with [the adapter](#opencode-adapter-test) on, OpenCode (and T3 Code through it) also gets
+  the model `vllm/qwen38-gittensor-dflash-opencode`, without reasoning levels.
 
 ### Other clients
 
@@ -294,6 +297,8 @@ The **Settings** button in the window opens them:
   request (`Authorization: Bearer <key>`, the API key field of an OpenAI-compatible client). Without a key,
   anyone who can reach the address can use the model, so set one before you share the API.
 - **Vision:** switches the model's image encoder on, see [Vision](#vision).
+- **OpenCode adapter (test):** serves a LoRA adapter trained for OpenCode as a model of its own, see
+  [OpenCode adapter](#opencode-adapter-test).
 - **Requests at the same time:** 1 to 4 slots, see [Several requests at once](#several-requests-at-once).
 - **Sessions kept in RAM:** a large session that another one pushed out of the GPU comes back in a second
   instead of being read again, see [Sessions in RAM](#sessions-in-ram).
@@ -362,6 +367,8 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
   you can also set a key of your own.
 - `fit_context`: `false` switches the automatic context reduction off.
 - `vision`: `true` loads the image encoder, so requests may contain images. See [Vision](#vision).
+- `opencode_adapter`: `true` serves the OpenCode adapter as the model `qwen38-gittensor-dflash-opencode`. See
+  [OpenCode adapter](#opencode-adapter-test).
 - `draft_tokens`: how many tokens the drafter proposes per round, 7 by default, up to 15. More makes reasoning
   17 to 30 percent faster and costs 0.17 GiB of KV cache each (about 10,000 tokens of context with NVFP4,
   5,400 with FP8), see [Speed](#speed).
@@ -371,8 +378,9 @@ The settings are stored in `%LOCALAPPDATA%\QwenStation\qwen-station.json`, on Li
 The same values work as command line options: `Qwen-Station.exe --preset 237k --keep --no-autostart`, on Linux
 `qwen-station --preset 237k --no-autostart`. `--check` prints the state of the installation as JSON and exits.
 `--setup` starts a needed setup without the click, `--location` names its folder. `--api-host 0.0.0.0` sets
-the address of the API for one run, `--kv-cache fp8` the KV cache, `--main-first` the setting of that name,
-`--agents opencode,pi` the coding agents, and `--no-register-clients` leaves every agent alone.
+the address of the API for one run, `--kv-cache fp8` the KV cache, `--main-first` and `--opencode-adapter` the
+settings of those names, `--agents opencode,pi` the coding agents, and `--no-register-clients` leaves every agent
+alone.
 
 ## Speed
 
@@ -440,6 +448,53 @@ What it costs:
 In a test the model named the colours and positions in a generated picture, kept two images apart in their
 order, and read the speed, the GPU and the VRAM figure off a screenshot of the dashboard. With vision on, the
 entries of the coding agents say that the model takes images.
+
+### OpenCode adapter (test)
+
+[harness-hub/Qwen3.8-27B-opencode-adapted](https://huggingface.co/harness-hub/Qwen3.8-27B-opencode-adapted) is a
+LoRA adapter for Qwen3.8 27B that Hugging Face trained with reinforcement learning as the model behind OpenCode.
+Its model card reports, under OpenCode with thinking off: SWE-bench Pro (the 51 hard tasks) 51.0 % instead of the
+model's 35.3 %, Terminal-Bench 2.1 52.4 % instead of 46.4 %. That is about as accurate as the model thinking at
+`xhigh`, with 6 to 8 times fewer generated tokens per task.
+
+With **OpenCode adapter (test)** switched on in the settings (or `--opencode-adapter`), the server loads it beside
+the model and answers to a third name, `qwen38-gittensor-dflash-opencode`. Requests for the other names do not use
+it. The first start with the setting downloads it (660 MB, a pinned revision).
+
+- **OpenCode and T3 Code** get an entry for it, without reasoning levels: the server runs it without thinking, as
+  it was trained, unless a request asks for thinking. Pi, DeepSeek Harness and Copilot do not get it. Switching
+  the setting off leaves the entry, as Qwen Station never deletes one; OpenCode then gets an error for that model.
+- **Its own chat template.** The checkpoint here ships a chat template of its own, which words the tool
+  instructions differently from the Qwen template the adapter learned. A local patch
+  (`patch-vllm-adapter-template.py`) renders the adapter's requests with the template that comes with it.
+- **Not evaluated on this build.** The adapter was trained and evaluated on the BF16 model; this one is NVFP4.
+  Whether the gains hold here is open, which is why the setting is marked as a test.
+
+Measured on 2026-11-20 (vLLM 0.32.0, RTX 5090, greedy, no thinking, a Python module with tests and a TypeScript
+class, 700 tokens each, two runs). Decode tok/s, in brackets the tokens kept per round:
+
+| Server | Requests for the model | Requests for the adapter |
+|---|---|---|
+| Without the adapter | 391 (6.2) | |
+| With the adapter | 348 (6.2) | 278 (6.0) |
+
+What it costs:
+
+- **VRAM.** The weights take 18.54 instead of 18.02 GiB. Qwen Station reserves 0.6 GiB for the adapter, so the
+  context can get one step of 32,768 tokens smaller.
+- **Speed.** Requests for the adapter decode about 29 % slower than the model on a server without it; while the
+  adapter is loaded, the model's own requests are about 11 % slower too. The drafter keeps as many tokens per
+  round as before: it does not use the adapter, and the adapter's code stays predictable for it.
+- **The first start** compiles the model once more for the new configuration, about a minute.
+
+The adapter pays off if it needs fewer turns and tokens per task, as the model card says, also on NVFP4. A first
+sign, small and from one task: OpenCode 2.3.2 fixed a failing unit test (a slug function that neither collapses
+nor strips its hyphens) three times with each model, all six runs with the tests passing afterwards. Medians:
+
+| | Time | Requests | Generated tokens |
+|---|---|---|---|
+| The model, reasoning `medium` | 132 s | 53 | 19,244 |
+| The adapter, no thinking | 50 s | 19 | 4,394 |
 
 ### Several requests at once
 
@@ -627,7 +682,7 @@ file is an AppImage: the same Python package and a standalone Python 3.12, behin
 | `qwen_station/dashboard.html` | The dashboard: one file, no external resources |
 | `qwen_station/engine/provision.sh` | Installs the engine below one prefix. Idempotent, also runs on native Linux. |
 | `qwen_station/engine/serve.sh` | Starts `vllm serve` with the tested settings |
-| `qwen_station/engine/patches/` | Six idempotent patches for vLLM; each file explains its reason |
+| `qwen_station/engine/patches/` | Eight idempotent patches for vLLM; each file explains its reason |
 | `qwen_station/engine/autotune/` | Verified FlashInfer kernel tuning |
 | `qwen_station/engine/engine.env` | Version pins: vLLM, Python, uv, CUDA packages, model revisions |
 
@@ -731,6 +786,13 @@ Tested on 2026-11-17 on one machine (Windows 11, RTX 5090, WSL 2.7.3):
   machine), its way into the configs of OpenCode and Pi, and its removal. On Linux, with the app from the
   checkout against an installed engine: the API on one address with a key, and on all interfaces without one.
   The settings window itself was driven in a headless browser against the mock server.
+- **OpenCode adapter (test, 2026-11-20)**, on Windows with the app from the checkout against the installed
+  distribution, with an engine folder of its own: the download at the first start with the setting on, the patch
+  applied to the installed vLLM, the three model names, the adapter's template and thinking off checked on the
+  running server, the speed against the model with and without the adapter loaded, and OpenCode 2.3.2 in an
+  isolated home solving a small task with each model three times. The settings window with the new switch in a
+  headless browser against the mock server. Not tested: the release exe with the setting, a full context with the
+  adapter, the adapter together with vision, slots or main session first, and its quality on real work.
 - **Linux**, with the AppImage of 1.3.0 as a user without root rights, in a fresh Ubuntu 24.04 without a
   compiler: first start (the app installs itself and continues as the installed copy), setup including the
   stop at the missing compiler and the restart after installing it (364 seconds), first start of the model

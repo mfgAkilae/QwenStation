@@ -472,6 +472,10 @@ dialog.sheet::backdrop { background: rgba(5, 16, 20, .62); }
           <input class="switch" id="vision" type="checkbox" role="switch">
         </div>
         <div class="row">
+          <div><label for="opencodeAdapter">OpenCode adapter (test)</label><small>Also serves a LoRA adapter that Hugging Face trained with reinforcement learning for the OpenCode coding agent, as the model <code>qwen38-gittensor-dflash-opencode</code>, always without thinking. OpenCode and T3 Code list it next to the model. It was trained on the full-precision model; on this NVFP4 build its quality is not measured. It takes 0.6 GiB of VRAM and a 660 MB download at the first start, and it slows decoding: about 29 % for its own requests, about 11 % for the others.</small></div>
+          <input class="switch" id="opencodeAdapter" type="checkbox" role="switch">
+        </div>
+        <div class="row">
           <div><label for="fitContext">Fit the context to the free VRAM</label><small>When other programs hold VRAM, the model starts with a smaller context instead of not at all.</small></div>
           <input class="switch" id="fitContext" type="checkbox" role="switch">
         </div>
@@ -1259,7 +1263,7 @@ function updateSettings() {
     + (model.subagent_fits ? "" : " While the main session uses most of its context, subagents wait.") : "";
   $("sumModel").textContent = `${$("kvCache").value === "fp8" ? "FP8" : "NVFP4"} KV, ${$("draftTokens").value} draft tokens` + (several ? `, ${$("slots").value} slots` : "")
     + (several && $("mainFirst").checked ? ", main session first" : "")
-    + ($("vision").checked ? ", vision" : "") + ($("ramCache").value > 0 ? `, ${$("ramCache").value} GiB RAM` : "")
+    + ($("vision").checked ? ", vision" : "") + ($("opencodeAdapter").checked ? ", OpenCode adapter" : "") + ($("ramCache").value > 0 ? `, ${$("ramCache").value} GiB RAM` : "")
     + ($("autostart").checked ? ", starts with the app" : "");
   $("sumApp").textContent = radio("closeAction") === "keep" ? "Closing keeps the model" : "Closing stops the model";
   const on = chosenAgents(), all = settingsData.agents;
@@ -1322,6 +1326,7 @@ function fillSettings(data) {
   $("fitContext").checked = v.fit_context;
   $("mainFirst").checked = v.main_first;
   $("vision").checked = v.vision;
+  $("opencodeAdapter").checked = v.opencode_adapter;
   $("autostart").checked = v.autostart;
   $("agentRows").innerHTML = data.agents.map((agent) => {
     const state = (data.clients || {})[agent.id];
@@ -1352,7 +1357,7 @@ async function saveSettings() {
   const numbers = { api_port: whole("apiPort"), station_port: whole("stationPort"), draft_tokens: whole("draftTokens"), slots: whole("slots"), ram_cache_gib: whole("ramCache") };
   for (const [key, value] of Object.entries(numbers)) if (value === null) { settingsError(key, "Enter a whole number."); return; }
   const values = { ...numbers, api_host: chosenHost(), ...(keyDraft === undefined ? {} : { api_key: keyDraft }), fit_context: $("fitContext").checked, kv_cache: $("kvCache").value, vision: $("vision").checked,
-    main_first: $("mainFirst").checked,
+    opencode_adapter: $("opencodeAdapter").checked, main_first: $("mainFirst").checked,
     autostart: $("autostart").checked, agents: chosenAgents(), close_action: radio("closeAction"),
     extra_args: $("extraArgs").value, extra_env: $("extraEnv").value };
   let result;

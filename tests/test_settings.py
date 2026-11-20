@@ -16,7 +16,7 @@ from qwen_station import config as config_module  # noqa: E402
 from qwen_station import clients, settings  # noqa: E402
 from qwen_station import supervisor as supervisor_module  # noqa: E402
 from qwen_station.app import Station  # noqa: E402
-from qwen_station.config import PRESETS, Config, load_config  # noqa: E402
+from qwen_station.config import ADAPTER_MODEL_ID, MODEL_ID, PRESETS, Config, load_config  # noqa: E402
 from qwen_station.relay import Relay  # noqa: E402
 from qwen_station.supervisor import LAN_STATE, ManagedLauncher, MockLauncher, NativeLauncher, Supervisor, WslLauncher  # noqa: E402
 from tests.test_station import free_port, request  # noqa: E402
@@ -421,6 +421,63 @@ class VisionTests(TempData):
         self.assertTrue(state["vision"])
         self.assertTrue(state["subtitle"].endswith(", vision"))
         self.assertEqual(settings.validate(station.config, settings.values(station.config), {"vision": "yes"}, [])[2], "vision")
+
+
+class AdapterTests(TempData):
+    """The OpenCode adapter, a test option: a LoRA adapter served beside the model under a name of its own."""
+
+    def test_the_start_script_only_hears_of_the_adapter_when_it_is_on(self):
+        self.assertNotIn("OPENCODE_ADAPTER=1", ManagedLauncher(Config(mode="managed")).command(PRESETS["262k"]))
+        self.assertIn("OPENCODE_ADAPTER=1",
+                      ManagedLauncher(Config(mode="managed", opencode_adapter=True)).command(PRESETS["262k"]))
+        self.assertIn("OPENCODE_ADAPTER=1", NativeLauncher(Config(mode="native", prefix="/data/engine",
+                                                                  opencode_adapter=True)).command(PRESETS["262k"]))
+
+    def test_the_adapter_takes_its_share_of_the_vram_from_the_context(self):
+        config = Config(mode="managed", opencode_adapter=True, register_clients=False, kv_cache="fp8")
+        supervisor = Supervisor(config, MockLauncher(config))
+        # Room for the full context without the adapter (see VisionTests), not with it.
+        row = {"index": 0, "name": "RTX 5090", "mem_total": 32607, "mem_free": 32.0 * 1024, "mem_used": 0}
+        self.assertEqual(supervisor_module.fit_context(row["mem_free"], 262144, kv_cache="fp8")[0], 262144)
+        config.mock = False  # the preflight only looks at the card for a real server
+        with mock.patch.object(supervisor_module.gpu, "query_once", return_value=[row]),                 mock.patch.object(supervisor_module.gpu, "pick", return_value=row),                 mock.patch.object(supervisor_module.gpu, "gpu_processes", return_value=[]):
+            supervisor.run_preflight("free")
+        self.assertEqual(supervisor.effective_preset()["context"], 229376)
+        self.assertIn("The OpenCode adapter takes 0.6 GiB", supervisor.warning)
+
+    def test_only_opencode_gets_the_adapter_and_its_entry_stays_when_switched_off(self):
+        opencode, pi = self.home / "opencode.json", self.home / "pi" / "models.json"
+        pi.parent.mkdir()
+        paths = {"opencode_file": opencode, "pi_file": pi}
+
+        def models():
+            return (json.loads(opencode.read_text(encoding="utf-8"))["provider"]["vllm"]["models"],
+                    [entry["id"] for entry in json.loads(pi.read_text(encoding="utf-8"))["providers"]["vllm"]["models"]])
+
+        clients.register_all("http://127.0.0.1:8000/v1", 163840, 4, kv_cache="nvfp4", **paths)
+        self.assertNotIn(ADAPTER_MODEL_ID, models()[0])  # nothing new for someone who never switches it on
+        clients.register_all("http://127.0.0.1:8000/v1", 163840, 4, kv_cache="nvfp4", adapter=True, **paths)
+        entries, pi_models = models()
+        self.assertEqual(entries[ADAPTER_MODEL_ID],
+                         {"name": "Qwen3.8 27B OpenCode adapter - NVFP4 KV - DFlash2 - 163K (RTX 5090) - 4 slots",
+                          "reasoning": False, "limit": {"context": 163840, "output": 32768}})
+        self.assertIn("variants", entries[MODEL_ID])  # the model itself keeps its reasoning levels
+        self.assertEqual(pi_models, [MODEL_ID])  # trained for OpenCode: Pi does not get it
+        clients.register_all("http://127.0.0.1:8000/v1", 163840, 4, kv_cache="nvfp4", **paths)
+        self.assertIn(ADAPTER_MODEL_ID, models()[0])  # Qwen Station only adds; it never deletes an entry
+
+    def test_the_adapter_waits_for_the_restart_and_shows_in_the_state(self):
+        station = self.station()
+        station.supervisor.state = "ready"
+        self.assertEqual(station.save_settings({"opencode_adapter": True})["pending"], ["opencode_adapter"])
+        self.assertEqual(station.state_json()["model"]["adapter_id"], "")
+        station.supervisor.before_start()
+        state = station.state_json()["model"]
+        self.assertEqual(state["adapter_id"], ADAPTER_MODEL_ID)
+        self.assertTrue(state["subtitle"].endswith(", OpenCode adapter"))
+        self.assertTrue(json.loads(Path(station.settings_file).read_text(encoding="utf-8"))["opencode_adapter"])
+        self.assertEqual(settings.validate(station.config, settings.values(station.config),
+                                           {"opencode_adapter": 1}, [])[2], "opencode_adapter")
 
 
 class SlotTests(TempData):

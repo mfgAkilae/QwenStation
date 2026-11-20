@@ -10,6 +10,7 @@ alone, and the first real change keeps a backup of the previous file next to it.
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import os
 import re
@@ -19,7 +20,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .config import AGENT_IDS, KV_CACHE_TYPES, MODEL_ID, OUTPUT_LIMIT, SUBAGENT_MODEL_ID
+from .config import ADAPTER_MODEL_ID, AGENT_IDS, KV_CACHE_TYPES, MODEL_ID, OUTPUT_LIMIT, SUBAGENT_MODEL_ID
 
 PROVIDER_ID = "vllm"  # OpenCode and Pi; T3 Code lists the model as vllm/<model>
 PROVIDER_NAME = "vLLM RTX 5090"
@@ -170,8 +171,9 @@ def key_reference(key_file: Path | None) -> str:
 
 def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, variant: str = "",
                    api_key: str = "", key_file: Path | None = None, vision: bool = False, kv_cache: str = "fp8",
-                   subagent: int = 0) -> dict:
-    """Same entry shape as register-qwen-opencode.py, so both starters agree."""
+                   subagent: int = 0, adapter: bool = False) -> dict:
+    """Same entry shape as register-qwen-opencode.py, so both starters agree.
+    adapter: the OpenCode adapter is on; it gets an entry of its own. Switched off, the entry stays, like any other."""
     updated = copy.deepcopy(config)
     provider = _child(_child(updated, "provider"), PROVIDER_ID)
     provider["npm"] = "@ai-sdk/openai-compatible"
@@ -188,7 +190,21 @@ def apply_opencode(config: dict, base_url: str, context: int, max_seqs: int, var
     if sub:
         _opencode_model(_child(models, SUBAGENT_MODEL_ID),
                         model_name(sub, max_seqs, variant, kv_cache, "subagent"), sub, vision)
+    if adapter:
+        _opencode_adapter_model(_child(models, ADAPTER_MODEL_ID),
+                                model_name(context, max_seqs, variant, kv_cache, "OpenCode adapter"), context)
     return updated
+
+
+def _opencode_adapter_model(entry: dict, name: str, context: int) -> None:
+    """The adapter was trained and evaluated with thinking off, and the server runs it that way: no reasoning
+    levels to choose from. Text only, like its training (vLLM does not put LoRA on the image encoder here)."""
+    entry["name"] = name
+    entry["reasoning"] = False
+    limit = _child(entry, "limit")
+    limit["context"] = context
+    if not isinstance(limit.get("output"), int):
+        limit["output"] = OUTPUT_LIMIT
 
 
 def _opencode_model(entry: dict, name: str, context: int, vision: bool) -> None:
@@ -597,9 +613,10 @@ def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = Fal
                  opencode_file: Path | None = None, pi_file: Path | None = None, variant: str = "",
                  api_key: str = "", key_file: Path | None = None, vision: bool = False,
                  agents=AGENT_IDS, deepseek_dir: Path | None = None, copilot_folders: list[Path] | None = None,
-                 t3_dir: Path | None = None, kv_cache: str = "fp8", subagent: int = 0) -> dict:
+                 t3_dir: Path | None = None, kv_cache: str = "fp8", subagent: int = 0, adapter: bool = False) -> dict:
     """Enter the model in every chosen agent. Returns one status per agent, in the order of AGENTS.
-    subagent: the context of the subagent model with "main session first", else 0."""
+    subagent: the context of the subagent model with "main session first", else 0.
+    adapter: the OpenCode adapter is on. Only OpenCode (and T3 Code through it) gets its entry: it was trained there."""
     chosen = set(agents)
     common = {"variant": variant, "api_key": api_key, "vision": vision, "kv_cache": kv_cache, "subagent": subagent}
     # T3 Code runs OpenCode and Pi; choosing it keeps their entries up to date.
@@ -614,8 +631,9 @@ def register_all(base_url: str, context: int, max_seqs: int, dry_run: bool = Fal
     pi_file = pi_file or pi_path()
     result: dict = {}
     if use_opencode:
-        opencode = _register(AGENTS["opencode"], opencode_file, apply_opencode, base_url, context, max_seqs, dry_run,
-                             must_exist=False, guard_credentials=True, key_file=key_file, **common)
+        opencode = _register(AGENTS["opencode"], opencode_file, functools.partial(apply_opencode, adapter=adapter),
+                             base_url, context, max_seqs, dry_run, must_exist=False, guard_credentials=True,
+                             key_file=key_file, **common)
     else:
         opencode = _not_selected(AGENTS["opencode"], opencode_file)
     if use_pi:

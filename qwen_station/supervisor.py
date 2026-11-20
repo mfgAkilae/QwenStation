@@ -69,6 +69,10 @@ NATIVE_START_MARGIN_MIB = 1024
 # needs another 0.75 GiB for a moment, a 4K screenshot 0.54 GiB. Without this reserve the card ran full with a
 # large image, Windows paged, and text got 20 to 55 percent slower.
 VISION_RESERVE_GIB = 1.7
+# What the OpenCode adapter adds. Measured 2026-11-20 on vLLM 0.32.0 with the same context and KV pool: the weights
+# take 18.54 instead of 18.02 GiB (the adapter in BF16 plus vLLM's LoRA buffers), the CUDA graphs 0.35 instead of
+# 0.38 GiB. A little more is reserved here.
+ADAPTER_RESERVE_GIB = 0.6
 MIN_FIT_CONTEXT = 65536
 # Main session first: subagents get at least this much context. Where less fits beside a main session of the
 # full context, they still get it and wait while the main session needs the room.
@@ -251,6 +255,8 @@ class WslLauncher:
             env.append(f"KV_OFFLOAD_GIB={config.ram_cache_gib}")
         if preset.get("subagent_context"):
             env.append(f"SUBAGENT_CTX={preset['subagent_context']}")  # main session first
+        if config.opencode_adapter:
+            env.append("OPENCODE_ADAPTER=1")
         env.append(f"KV_DTYPE={config.kv_cache}")  # before extra_env, which may still override it
         if config.vision:
             # vLLM keys its cache of compiled graphs without the multimodal settings, but with images on the
@@ -600,7 +606,9 @@ class Supervisor:
                 preset = PRESETS[self.preset]
                 drafts = self.config.draft_tokens
                 more_drafts = drafts > DEFAULT_DRAFT_TOKENS  # the preset's KV pool is sized for the default
+                adapter = self.config.opencode_adapter
                 reserve = (preset.get("fit_reserve_gib", FIT_RESERVE_GIB) + (VISION_RESERVE_GIB if vision else 0)
+                           + (ADAPTER_RESERVE_GIB if adapter else 0)
                            - (LINUX_RESERVE_RELIEF_GIB if self.config.mode == "native" else 0))
                 # What must be free for the preset's whole context: the reserve and the KV pool for it. Up to
                 # 1.5.0 this was 0.92 of the card (29.3 GiB), which let the full context start on a card that
@@ -632,7 +640,8 @@ class Supervisor:
                                + (f" {drafts} draft tokens per round also take part of the memory."
                                   if more_drafts else "")
                                + (f" Vision takes {VISION_RESERVE_GIB} GiB of it; switch it off in the settings "
-                                  "for a larger context." if vision else ""))
+                                  "for a larger context." if vision else "")
+                               + (f" The OpenCode adapter takes {ADAPTER_RESERVE_GIB} GiB." if adapter else ""))
                 if tight:
                     warning = (f"Only {_gib(row['mem_free'])} GiB of VRAM was free at the start, and the model needs "
                                f"about {_gib(need)} GiB. "
@@ -797,7 +806,8 @@ class Supervisor:
                                       dry_run=not write, variant=preset.get("variant", ""),
                                       api_key=self.config.api_key, key_file=data_dir() / KEY_FILE,
                                       vision=self.config.vision, agents=self.config.agents,
-                                      kv_cache=self.config.kv_cache, subagent=preset.get("subagent_context", 0))
+                                      kv_cache=self.config.kv_cache, subagent=preset.get("subagent_context", 0),
+                                      adapter=self.config.opencode_adapter)
         for entry in result.values():
             if entry.get("changed"):
                 self.log.add(f"--- {entry['client']}: model {entry['model']} {entry['detail']} ({entry['path']})", "step")
